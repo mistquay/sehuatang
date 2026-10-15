@@ -5,7 +5,8 @@ import threading
 from functools import wraps
 from datetime import datetime, timedelta, timezone
 from util.log_util import log
-from util.failure_policy import describe_failure, max_failures, mongo_due_query, mongo_retry_count
+from util.failure_policy import (NON_RETRYABLE_ERRORS, describe_failure, max_failures,
+                                 mongo_due_query, mongo_retry_count, mongo_retry_stopped)
 from util.config import date, mongodb_host, mongodb_port, mongodb_conn_str, mongodb_use_conn_str
 from util.resource_clock import (
     RESOURCE_FIELDS,
@@ -339,7 +340,8 @@ def record_crawl_failures(failures, collection=None):
                 "created_at": {"$ifNull": ["$created_at", now]},
             }},
             {"$set": {"next_retry_at": {"$cond": [
-                {"$gte": [mongo_retry_count(), maximum]}, None,
+                {"$or": [{"$gte": [mongo_retry_count(), maximum]},
+                         {"$in": ["$error_type", list(NON_RETRYABLE_ERRORS)]}]}, None,
                 {"$add": [now, {"$multiply": [60000, delay_minutes]}]},
             ]}}},
         ]
@@ -476,7 +478,7 @@ def list_crawl_failures(source=None, limit=100, collection=None, state=None):
     if source:
         match["source"] = source
     status_expr = {"$switch": {"branches": [
-        {"case": {"$gte": [mongo_retry_count(), maximum]}, "then": "exhausted"},
+        {"case": mongo_retry_stopped(maximum), "then": "exhausted"},
         {"case": {"$and": [{"$ne": [{"$ifNull": ["$next_retry_at", None]}, None]},
                              {"$lte": ["$next_retry_at", now]}]}, "then": "due"},
     ], "default": "waiting"}}
@@ -506,7 +508,7 @@ def requeue_crawl_failure(source, key, stage, collection=None):
 
 def requeue_exhausted_crawl_failures(source, collection=None):
     return _requeue_crawl_failures({"source": source, "resolved_at": None,
-        "$expr": {"$gte": [mongo_retry_count(), max_failures()]}}, collection)
+        "$expr": mongo_retry_stopped(max_failures())}, collection)
 
 
 def _requeue_crawl_failures(query, collection=None):

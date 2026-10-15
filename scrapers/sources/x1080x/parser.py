@@ -1,15 +1,17 @@
-"""解析 x1080x（Discuz archiver 模式）列表页和详情页。
+"""解析 x1080x 普通 Discuz 页面，保留旧 archiver 样本的详情兼容。
 
 选择器同时覆盖 archiver 简化页和普通页两套 DOM，
 以兼容站点在不同镜像/版本间的差异。
 """
 import re
+from dataclasses import dataclass
 from html import unescape
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from scrapers.core.contracts import DetailValidationError
+from scrapers.core.cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited
 
 from util.javbee_code import normalize_code_key, resolve_x1080x_code
 
@@ -29,6 +31,20 @@ _UNAVAILABLE_MARKERS = (
 _GIF_MARKERS = (".gif", "format=gif", "ext=gif", "type=gif", "image/gif")
 
 
+class ListValidationError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class ListPage:
+    tids: List[int]
+    last_page: Optional[int] = None
+
+
+_EMPTY_LIST_MARKERS = ("本版块或指定的范围内尚无主题", "本版塊或指定的範圍內尚無主題",
+                       "没有找到符合条件的主题", "沒有找到符合條件的主題")
+
+
 def _ordered_unique(values) -> list:
     return list(dict.fromkeys(values))
 
@@ -39,7 +55,7 @@ def _is_gif_url(url: str) -> bool:
 
 
 class X1080XParser:
-    """x1080x archiver 页面解析器。"""
+    """x1080x 普通页面解析器。"""
 
     def __init__(self, type_map: Optional[Dict[str, str]] = None):
         self.type_map = dict(type_map or {})
@@ -74,6 +90,51 @@ class X1080XParser:
             if match:
                 tids.append(int(match.group(1)))
         return _ordered_unique(tids)
+
+    def parse_list_page(self, html_content: bytes, expected_page: int) -> ListPage:
+        """仅明确末页/空列表可结束扫描，验证页与重定向页不算空页。"""
+        if is_cf_blocked(html_content) or is_cf_challenge(html_content, 200) or is_rate_limited(html_content):
+            raise ListValidationError("列表响应为验证或受限页面")
+        soup = BeautifulSoup(html_content, "html.parser")
+        scope = soup.select_one("#threadlist")
+        if scope is None or self.is_unavailable(soup, soup.get_text(" ", strip=True)[:2000]):
+            raise ListValidationError("缺少普通列表结构或站点不可用")
+        tids = self.parse_list(html_content)
+        current_pages, last_pages = set(), set()
+        for pager in soup.select(".pg"):
+            current = pager.select_one("strong")
+            label = current.get_text(strip=True) if current else ""
+            if not label.isdigit():
+                raise ListValidationError("分页栏缺少当前页码")
+            current_page = int(label)
+            current_pages.add(current_page)
+            has_next = bool(pager.select_one(".nxt, [rel~=next]"))
+            linked_pages = []
+            for anchor in pager.select("a[href]"):
+                values = parse_qs(urlparse(anchor.get("href", "")).query)
+                number = values.get("page", [""])[0]
+                if number.isdigit():
+                    linked_pages.append(int(number))
+                    label = anchor.get_text(strip=True)
+                    if "last" in anchor.get("class", []) or label.startswith("...") or re.search(r"末[页頁]|尾[页頁]", label):
+                        last_pages.add(int(number))
+                if re.search(r"下一[页頁]|next", anchor.get_text(strip=True), re.I):
+                    has_next = True
+            if not has_next and all(number <= current_page for number in linked_pages):
+                last_pages.add(current_page)
+        if current_pages and current_pages != {expected_page}:
+            raise ListValidationError(f"响应页码与请求第 {expected_page} 页不一致")
+        if len(last_pages) > 1:
+            raise ListValidationError("分页栏末页不一致")
+        last_page = next(iter(last_pages), None)
+        if last_page is not None and last_page < expected_page:
+            raise ListValidationError("请求页码超过末页")
+        if not tids:
+            if not any(marker in scope.get_text(" ", strip=True) for marker in _EMPTY_LIST_MARKERS):
+                raise ListValidationError("列表为空但缺少明确空列表提示")
+            if last_page is not None and last_page > expected_page:
+                raise ListValidationError("末页之前出现空列表")
+        return ListPage(tids, last_page)
 
     def parse_detail(
         self,
@@ -111,6 +172,8 @@ class X1080XParser:
         content_text = content_node.get_text("\n", strip=True)
 
         magnets = self._extract_magnets(content_html, content_text)
+        if not magnets and self._requires_membership(content_node):
+            return invalid("membership_required")
         page_typeid, page_section = self._extract_section(soup)
         resolved_typeid = page_typeid or str(typeid or "")
         resolved_section = (
@@ -139,6 +202,16 @@ class X1080XParser:
         }
 
     @staticmethod
+    def _requires_membership(content_node) -> bool:
+        for node in content_node.select(".locked"):
+            text = node.get_text(" ", strip=True)
+            if "VIP" in text.upper() and any(marker in text for marker in (
+                "免费", "免費", "下载", "下載", "加入", "会员", "會員",
+            )):
+                return True
+        return False
+
+    @staticmethod
     def _extract_title(soup: BeautifulSoup) -> str:
         node = soup.select_one("#thread_subject")
         if node:
@@ -162,6 +235,8 @@ class X1080XParser:
     def _extract_publish_date(soup: BeautifulSoup) -> Optional[str]:
         candidates = []
         for node in soup.select('em[id^="authorposton"]'):
+            # 普通页可能显示“几分钟前”，完整日期位于子节点 title 属性。
+            candidates.extend("发表于 " + child.get("title", "") for child in node.select("[title]"))
             candidates.append(node.get_text(" ", strip=True))
         for node in soup.select("p.author"):
             candidates.append(node.get_text(" ", strip=True))

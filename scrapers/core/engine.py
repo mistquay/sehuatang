@@ -72,6 +72,9 @@ class CrawlEngine:
             else repository.select_targets(discovery.targets)
         )
         targets = list({target.key: target for target in targets}.values())
+        normalize = getattr(source, "normalize_target", None)
+        if normalize is not None:
+            targets = [normalize(target) for target in targets]
         summary.requested = len(targets)
 
         def persist(items):
@@ -102,6 +105,8 @@ class CrawlEngine:
                 if summary.details.get("rate_limited") and (
                     not hasattr(type(self.http), "all_cooling") or self.http.all_cooling
                 ):
+                    break
+                if summary.details.get("cf_blocked"):
                     break
         summary.details.update(write_batches=writer.batches, persist_ms=writer.persist_ms,
                                write_queue_wait_ms=writer.queue_wait_ms)
@@ -139,6 +144,8 @@ class CrawlEngine:
                 # 站点级暂时阻塞不计入单帖失败次数；补抓客户端会在返回前恢复。
                 continue
             if not result.ok:
+                if result.error_type == "cf_blocked":
+                    summary.details["cf_blocked"] = True
                 failures.append(
                     CrawlFailure(
                         source=source.name,
@@ -164,6 +171,8 @@ class CrawlEngine:
             except Exception as exc:
                 error_type = (exc.reason if isinstance(exc, DetailValidationError)
                               else type(exc).__name__.lower())
+                if error_type == "membership_required":
+                    summary.details["membership_required"] = summary.details.get("membership_required", 0) + 1
                 logger.warning(
                     "详情解析异常: "
                     f"run_id={context.run_id} source={source.name} "

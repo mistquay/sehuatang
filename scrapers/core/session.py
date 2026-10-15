@@ -12,6 +12,8 @@ from curl_cffi import requests
 
 from scrapers.core.cf_challenge import (
     FlareSolverrClient,
+    SiteBlocked,
+    is_cf_blocked,
     is_cf_challenge,
     is_rate_limited,
     merge_solution_cookies,
@@ -97,6 +99,8 @@ class SessionHttpClient:
         except SiteRateLimited:
             return FetchResult(url, None, 429, 0, 0,
                                error_type="rate_limited", error_message="站点正在冷却")
+        if result.error_type == "cf_blocked":
+            return result
         if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
                 or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
             self.gate.limit()
@@ -116,6 +120,8 @@ class SessionHttpClient:
         result = self._transport.fetch(url, stage)
         if self._local.request_version is not None:
             version = self._local.request_version
+        if result.error_type == "cf_blocked" or is_cf_blocked(result.body):
+            return replace(result, error_type="cf_blocked", error_message="Cloudflare 明确拒绝访问")
         if (is_rate_limited(result.body) or result.error_type == "siteratelimited"
                 or (result.status_code == 429 and not is_cf_challenge(result.body, 200))):
             return result
@@ -125,6 +131,10 @@ class SessionHttpClient:
         self.log.info(f"触发 CF 挑战: stage={stage} url={redact_url(url)}")
         try:
             body, extra_attempts = self._resolve_challenge(url, version)
+        except SiteBlocked as exc:
+            return FetchResult(url, None, 403, result.attempts + getattr(exc, "attempts", 1),
+                               int((time.monotonic() - started) * 1000),
+                               error_type="cf_blocked", error_message=str(exc))
         except SiteRateLimited as exc:
             return FetchResult(url, None, 429,
                                result.attempts + getattr(exc, "attempts", 0),
@@ -210,7 +220,7 @@ class SessionHttpClient:
             response = session.get(url, cookies=cookies, headers=headers, **kwargs)
         finally:
             self._local.network_timing = (started, max(0, int((time.monotonic() - started) * 1000)))
-        if (is_rate_limited(response.content)
+        if not is_cf_blocked(response.content) and (is_rate_limited(response.content)
                 or (response.status_code == 429 and not is_cf_challenge(response.content, 200))):
             self.gate.limit(CrawlerHttpClient._retry_after(response))
         with self._cookie_lock:
@@ -308,13 +318,21 @@ class SessionHttpClient:
                     return None, attempts
                 retry = self._transport.fetch(url, stage="cf_retry")
                 attempts += retry.attempts
+                if retry.error_type == "cf_blocked" or is_cf_blocked(retry.body):
+                    exc = SiteBlocked("复用会话后 Cloudflare 明确拒绝访问")
+                    exc.attempts = attempts
+                    raise exc
                 if (is_rate_limited(retry.body) or retry.error_type == "siteratelimited"
                         or (retry.status_code == 429 and not is_cf_challenge(retry.body, 200))):
                     self.gate.limit()
                     raise SiteRateLimited()
                 if retry.ok and not is_cf_challenge(retry.body, retry.status_code):
                     return retry.body, attempts
-            body = self._bypass(url)
+            try:
+                body = self._bypass(url)
+            except SiteBlocked as exc:
+                exc.attempts = attempts + 1
+                raise
             attempts += 1
             if body is not None:
                 return body, attempts
@@ -324,7 +342,11 @@ class SessionHttpClient:
                     self._jar.clear()
                     self._cookie_version += 1
                 self.log.warning("CF 过盾失败，已清空缓存 Cookie 重试")
-                body = self._bypass(url)
+                try:
+                    body = self._bypass(url)
+                except SiteBlocked as exc:
+                    exc.attempts = attempts + 1
+                    raise
                 attempts += 1
                 if body is not None:
                     return body, attempts

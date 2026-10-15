@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from scrapers.core.contracts import CrawlFailure, CrawlTarget
-from util.failure_policy import describe_failure, max_failures, next_retry_at, retry_count
+from util.failure_policy import (NON_RETRYABLE_ERRORS, describe_failure, max_failures,
+                                 next_retry_at, retry_count, retry_stopped)
 
 _FILE_LOCK = threading.RLock()
 
@@ -37,7 +38,8 @@ class JsonFailureStore:
                 previous = by_key.get(key) or {}
                 attempts = max(1, failure.attempts)
                 count = retry_count(previous) + 1
-                due = next_retry_at(count, now, max_failures())
+                due = (None if failure.error_type in NON_RETRYABLE_ERRORS
+                       else next_retry_at(count, now, max_failures()))
                 by_key[key] = {
                     "source": failure.source,
                     "source_key": failure.key,
@@ -131,7 +133,7 @@ class JsonFailureStore:
                 if key is not None:
                     if (row["source_key"], row["stage"]) != (key, stage):
                         continue
-                elif retry_count(row) < max_failures():
+                elif not retry_stopped(row, max_failures()):
                     continue
                 row["retry_reset_count"] = int(row.get("failure_count", 0))
                 row["requeued_at"] = now

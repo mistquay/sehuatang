@@ -1010,7 +1010,7 @@
             <div>
               <h2>失败台账</h2>
               <p class="hint" id="failurePolicy">
-                达到上限后停止重试，保留失败记录
+                达到上限或遇明确封锁、会员限制时停止重试，保留失败记录
               </p>
             </div>
             <div class="filters">
@@ -1023,10 +1023,10 @@
                 <option value="">全部状态</option>
                 <option value="due">到期待重试</option>
                 <option value="waiting">等待重试</option>
-                <option value="exhausted">已达上限</option>
+                <option value="exhausted">已停止</option>
               </select>
               <button id="requeueExhausted" disabled title="先选择一个来源">
-                重新入队已达上限
+                重新入队已停止
               </button>
             </div>
           </div>
@@ -1268,7 +1268,7 @@
         already_running: "运行中",
         due: "到期待重试",
         waiting: "等待重试",
-        exhausted: "已达上限",
+        exhausted: "已停止",
       };
       function badge(state) {
         return `<span class="badge ${esc(state === "success" ? "ok" : state)}">${esc(labels[state] || state || "—")}</span>`;
@@ -1510,16 +1510,16 @@
         const source = $("failureSource").value;
         $("requeueExhausted").disabled = !source || !counts.exhausted;
         $("requeueExhausted").textContent =
-          `重新入队已达上限${source ? ` (${counts.exhausted || 0})` : ""}`;
+          `重新入队已停止${source ? ` (${counts.exhausted || 0})` : ""}`;
         $("requeueExhausted").title = source
-          ? `只处理 ${source} 已达上限的记录`
+          ? `只处理 ${source} 已停止的记录`
           : "先选择一个来源";
         $("failureCount").textContent = Object.values(counts).reduce(
           (a, b) => a + b,
           0,
         );
         $("failurePolicy").textContent =
-          `每轮最多累计失败 ${data.max_failures} 次（含首次失败），达到上限后停止自动重试`;
+          `每轮最多累计失败 ${data.max_failures} 次（含首次失败），达到上限或遇明确封锁、会员限制时停止自动重试`;
         $("failureStats").innerHTML = ["due", "waiting", "exhausted"]
           .map((s) => `<span>${labels[s]} <b>${counts[s] || 0}</b></span>`)
           .join("");
@@ -1768,7 +1768,7 @@
           $("requeueExhausted"),
           "/api/failures/requeue-exhausted",
           { source: $("failureSource").value },
-          "该来源已达上限的记录已重新入队，可点击「重试失败」执行",
+          "该来源已停止的记录已重新入队，可点击「重试失败」执行",
         );
       for (const id of [
         "runSource",

@@ -24,6 +24,7 @@ def main():
         "tests.recovery_tests", "tests.crawler_core_tests", "tests.sehuatang_source_tests",
         "tests.x1080x_tests", "tests.web_app_tests", "tests.page_backfill_tests",
         "tests.x1080x_rate_limit_tests",
+        "tests.x1080x_normal_tests",
         "tests.x1080x_code_tests",
         "tests.log_filter_tests",
         "tests.javbee_tests", "tests.backfill_tests", "tests.mongo_recovery_tests",

@@ -36,7 +36,7 @@ x1080x:
   # 站点镜像域名频繁更换，可用 CRAWLER_X1080X_BASE_URL 覆盖
   base_url: "https://agaghhh.cc"
   fid: 244
-  # 每个分类抓取的 archiver 列表页数（增量抓取 3 页足够，补历史时调大）
+  # 每个分类的普通列表页数，按发帖时间倒序；根据发帖量覆盖两次轮询间的新帖
   page_limit: 3
   # typeid -> 分类名；站点分类调整时在此覆盖
   typeids:
@@ -132,8 +132,8 @@ crawler:
       # 增量抓到新数据时发送 Telegram 推送（沿用 sendMessage 配置；
       # dry-run / retry-failed / 补抓不推送）
       notify_telegram: true
-      # 下列值对应 4 个代理端口；无代理时只使用一个直连组。
-      concurrency: 4
+      # 普通页先以单请求并发试运行，按真实站点反馈调整。
+      concurrency: 1
       per_proxy_concurrency: 1
       rate_limit:
         # 同端口所有 worker 的列表、详情、HTTP 重试和过盾共用最小间隔。
@@ -158,7 +158,8 @@ crawler:
         #   或用环境变量 CRAWLER_X1080X_FLARESOLVERR_URL）
         flaresolverr_url: ""
       schedule:
-        cron: "0 3 * * *"
+        # 游客磁链仅发布后 6 小时内可见；此频率是试运行起点，已有部署需自行更新。
+        cron: "*/20 * * * *"
 
 proxy:
   # 旧通知模块使用的代理；爬虫请求请使用 crawler.sources.*.http.proxy

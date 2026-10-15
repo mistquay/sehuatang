@@ -111,8 +111,8 @@ class X1080XScraper:
         http = BackfillHttpClient(self.http)
         engine = CrawlEngine(http, self.failure_store, getattr(self, "storage_settings", None))
         checkpoints = checkpoint_store or build_checkpoint_store(
-            "x1080x", start_page, end_page, self.config.get("base_url", ""),
-            f"fid={source.fid};default")
+            "x1080x", start_page, end_page, source.base_url,
+            f"fid={source.fid};normal;orderby=dateline;v1")
 
         selected = {
             str(typeid): source.type_map[str(typeid)]
@@ -137,6 +137,7 @@ class X1080XScraper:
         seen_tids = set()
 
         for typeid, section in selected.items():
+            seen_pages = set()
             first_page = start_page
             if resume:
                 completed = checkpoints.load("x1080x", typeid)
@@ -155,7 +156,7 @@ class X1080XScraper:
             summary["partitions"][typeid] = partition_summary
 
             for page in range(first_page, end_page + 1):
-                result = http.fetch(source.list_url(typeid, page), stage="list")
+                result, parsed = source.fetch_list_page(http, typeid, page)
                 if not result.ok:
                     partition_summary["stopped"] = f"list_failed@{page}"
                     summary["failed"] += 1
@@ -163,26 +164,21 @@ class X1080XScraper:
                         "x1080x 补抓列表页失败，该分类暂停（检查点未推进，可 --resume 继续）: "
                         f"typeid={typeid} page={page} error_type={result.error_type}"
                     )
+                    if result.error_type == "cf_blocked":
+                        summary["stopped"] = "cf_blocked"
                     break
 
-                tids = source.parser.parse_list(result.body)
-                if not tids and page == first_page:
-                    # 与增量 discover 一致：首个页面 0 条先重试一次再定论。
-                    log.warning(
-                        f"x1080x 分类 {typeid} 第 {page} 页解析为 0 条，重试一次"
-                    )
-                    retry_fetch = http.fetch(
-                        source.list_url(typeid, page), stage="list"
-                    )
-                    if retry_fetch.ok:
-                        result = retry_fetch
-                        tids = source.parser.parse_list(result.body)
-                    if not tids:
-                        source.dump_empty_list_page(typeid, page, result.body)
+                tids = parsed.tids
                 if not tids:
                     partition_summary["stopped"] = f"exhausted@{page}"
                     log.info(f"x1080x 分类 {typeid} 第 {page} 页无内容，视为到底")
                     break
+                signature = frozenset(tids)
+                if signature in seen_pages:
+                    partition_summary["stopped"] = f"repeated_page@{page}"
+                    summary["failed"] += 1
+                    break
+                seen_pages.add(signature)
 
                 targets = []
                 for tid in tids:
@@ -218,8 +214,21 @@ class X1080XScraper:
                 partition_summary["saved"] += page_run.saved
                 partition_summary["failed"] += page_run.failed
 
+                blocked = ("cf_blocked" if page_run.details.get("cf_blocked") else
+                           "membership_required" if page_run.details.get("membership_required") else "")
+                if blocked:
+                    partition_summary["stopped"] = f"{blocked}@{page}"
+                    summary["stopped"] = blocked
+                    log.warning(f"x1080x 补抓暂停: {blocked}，当前页检查点未推进")
+                    break
                 if not dry_run:
                     checkpoints.save("x1080x", typeid, page)
+                if parsed.last_page is not None and page >= parsed.last_page:
+                    partition_summary["stopped"] = f"last_page@{page}"
+                    break
+
+            if summary.get("stopped"):
+                break
 
         log.info(
             "x1080x 分页补抓结束: "

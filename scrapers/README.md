@@ -64,6 +64,10 @@ CRAWLER_SEHUATANG_FLARESOLVERR_URL
 
 ### x1080x 限流与历史补抓
 
+当前使用普通页面并按发帖时间倒序。游客磁链仅免费期内可见；遇到明确封锁或会员限制，
+失败台账停止自动重试，补抓停在当前页。旧 archiver 检查点不复用。
+配置、兼容与验证边界见 [普通页抓取说明](../docs/X1080X_NORMAL_CRAWLING.md)。
+
 `crawler.sources.x1080x.rate_limit` 控制该来源的请求频率：
 
 ```yaml

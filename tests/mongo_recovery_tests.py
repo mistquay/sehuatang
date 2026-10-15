@@ -68,6 +68,19 @@ class MongoRecoveryTests(unittest.TestCase):
         self.assertEqual({}, data["due_counts"])
         self.assertEqual(1, data["counts"]["exhausted"])
 
+    def test_membership_and_block_stop_immediately_but_can_be_requeued(self):
+        for reason in ("membership_required", "cf_blocked"):
+            failure = {**self.failure, "source": "x1080x", "source_key": reason, "error_type": reason}
+            record_crawl_failures([failure], self.collection)
+            row = self.collection.find_one({"source_key": reason})
+            self.assertEqual(1, row["failure_count"])
+            self.assertIsNone(row["next_retry_at"])
+        self.assertEqual([], find_due_crawl_failures("x1080x", collection=self.collection))
+        self.assertEqual(2, list_crawl_failures(collection=self.collection)["counts"]["exhausted"])
+        self.assertEqual(2, requeue_exhausted_crawl_failures("x1080x", self.collection))
+        self.assertEqual(2, len(find_due_crawl_failures("x1080x", collection=self.collection)))
+        self.assertEqual(0, requeue_exhausted_crawl_failures("x1080x", self.collection))
+
     def test_stage_transition_keeps_original_retry_budget(self):
         record_crawl_failures([self.failure], self.collection)
         changed = {**self.failure, "stage": "parse", "error_type": "invalid_document",

@@ -1,5 +1,6 @@
-"""x1080x 来源模块（Discuz archiver 模式，游客可访问，无需论坛账号）。"""
+"""x1080x 普通页来源；游客仅能读取免费时限内的下载内容。"""
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -15,7 +16,7 @@ from scrapers.core.http import CrawlerHttpClient
 from scrapers.core.models import FetchResult
 from util.log_util import log
 
-from .parser import X1080XParser
+from .parser import X1080XParser, ListValidationError
 
 DEFAULT_BASE_URL = "https://agaghhh.cc"
 DEFAULT_FID = 244
@@ -54,11 +55,36 @@ class X1080XSource:
     def list_url(self, typeid: str, page: int) -> str:
         return (
             f"{self.base_url}/forum.php?mod=forumdisplay&fid={self.fid}"
-            f"&archiver=1&page={page}&filter=typeid&typeid={typeid}"
+            f"&page={page}&filter=typeid&typeid={typeid}&orderby=dateline"
         )
 
     def detail_url(self, tid: int) -> str:
-        return f"{self.base_url}/forum.php?mod=viewthread&tid={tid}&archiver=1"
+        return f"{self.base_url}/forum.php?mod=viewthread&tid={tid}"
+
+    def normalize_target(self, target: CrawlTarget) -> CrawlTarget:
+        """旧失败台账保留原记录，请求时按当前域名和普通详情入口重建 URL。"""
+        return replace(target, url=self.detail_url(int(target.key)))
+
+    def fetch_list_page(self, http, typeid, page):
+        result = http.fetch(self.list_url(typeid, page), stage="list")
+        self._check_rate_limit(result)
+        if not result.ok:
+            return result, None
+        try:
+            parsed = self.parser.parse_list_page(result.body, page)
+        except ListValidationError:
+            # 只重试一次非目标页面，不能把重试失败或中间态当作列表到底。
+            retry = http.fetch(self.list_url(typeid, page), stage="list")
+            self._check_rate_limit(retry)
+            result = replace(retry, attempts=result.attempts + retry.attempts)
+            if not result.ok:
+                return result, None
+            try:
+                parsed = self.parser.parse_list_page(result.body, page)
+            except ListValidationError as exc:
+                self.dump_empty_list_page(typeid, page, result.body)
+                return replace(result, error_type="invalid_list", error_message=str(exc)), None
+        return result, parsed
 
     def dump_empty_list_page(self, typeid: str, page: int, body) -> None:
         """首个列表页就解析出 0 条时留现场：告警并把响应体落盘。
@@ -100,11 +126,14 @@ class X1080XSource:
         pages_fetched = 0
 
         for typeid, section in self.type_map.items():
+            seen_pages = set()
             for page in range(1, self.page_limit + 1):
-                result = http.fetch(self.list_url(typeid, page), stage="list")
+                result, parsed = self.fetch_list_page(http, typeid, page)
                 list_retries += max(0, result.attempts - 1)
                 self._check_rate_limit(result)
                 if not result.ok:
+                    if result.error_type == "cf_blocked":
+                        raise RuntimeError("x1080x 列表被 Cloudflare 明确封锁，停止本轮抓取")
                     list_failures += 1
                     log.warning(
                         "x1080x 列表页获取失败: "
@@ -114,25 +143,15 @@ class X1080XSource:
                     break
 
                 pages_fetched += 1
-                tids = self.parser.parse_list(result.body)
-                if not tids and page == 1:
-                    # 首页 0 条多为过盾返回了中间态页面（byparr 并发时会发生），
-                    # 重试一次再定论；仍为空则留诊断现场。
-                    log.warning(
-                        f"x1080x 分类 {typeid} 首页解析为 0 条，重试一次"
-                    )
-                    retry_fetch = http.fetch(
-                        self.list_url(typeid, page), stage="list"
-                    )
-                    self._check_rate_limit(retry_fetch)
-                    if retry_fetch.ok:
-                        result = retry_fetch
-                        tids = self.parser.parse_list(result.body)
-                    if not tids:
-                        self.dump_empty_list_page(typeid, page, result.body)
+                tids = parsed.tids
                 if not tids:
-                    # 空页视为该分类到底，不再翻后续页。
                     break
+                signature = frozenset(tids)
+                if signature in seen_pages:
+                    list_failures += 1
+                    log.warning(f"x1080x 分类 {typeid} 第 {page} 页重复，停止该分类")
+                    break
+                seen_pages.add(signature)
                 for tid in tids:
                     if tid in seen_tids:
                         continue
@@ -149,6 +168,8 @@ class X1080XSource:
                             },
                         )
                     )
+                if parsed.last_page is not None and page >= parsed.last_page:
+                    break
 
         if not pages_fetched:
             raise RuntimeError("x1080x 所有分类列表页均获取失败")
@@ -184,7 +205,8 @@ class X1080XSource:
             if not payload.get("magnet"):
                 raise DetailValidationError("missing_magnet")
         except DetailValidationError as exc:
-            self._diagnose_detail(tid, result, exc.reason)
+            if exc.reason != "membership_required":
+                self._diagnose_detail(tid, result, exc.reason)
             raise
         return CrawlRecord(target=target, payload=payload)
 

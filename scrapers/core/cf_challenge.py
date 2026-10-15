@@ -42,8 +42,19 @@ class SiteRateLimited(Exception):
     pass
 
 
+class SiteBlocked(Exception):
+    """服务端明确拒绝访问，继续解题或冷却不能视为可恢复挑战。"""
+
+
+def is_cf_blocked(body: Optional[bytes]) -> bool:
+    head = (body or b"")[:16000].lower()
+    return b"cloudflare" in head and any(marker in head for marker in (
+        b"sorry, you have been blocked", b"cf-error-details", b"error code: 1020",
+    ))
+
+
 def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
-    if not body:
+    if not body or is_cf_blocked(body):
         return False
     head = body[:5000]
     if any(marker in head for marker in _CF_BODY_MARKERS):
@@ -57,7 +68,7 @@ def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
 
 def is_rate_limited(body: Optional[bytes]) -> bool:
     """识别站点限流页（"请求过于频繁"/"访问受限"），与 CF 挑战区分。"""
-    if not body:
+    if not body or is_cf_blocked(body):
         return False
     text = body[:5000].decode("utf-8", errors="ignore")
     return any(marker in text for marker in _RATE_LIMIT_MARKERS)
@@ -136,6 +147,8 @@ class FlareSolverrClient:
             return None
 
         response_body = (solution.get("response") or "").encode("utf-8")
+        if is_cf_blocked(response_body):
+            raise SiteBlocked("验证服务返回 Cloudflare 明确封锁页")
         if self.raise_on_rate_limit and (is_rate_limited(response_body)
                 or (solution.get("status") == 429 and not is_cf_challenge(response_body, 200))):
             raise SiteRateLimited("FlareSolverr 返回站点限流响应")

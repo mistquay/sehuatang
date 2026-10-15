@@ -110,6 +110,10 @@ class CrawlerHttpClient:
                 last_status = int(response.status_code)
                 body = response.content or b""
                 last_body = body
+                from .cf_challenge import is_cf_blocked
+                if is_cf_blocked(body):
+                    return FetchResult(url, body, last_status, attempt, self._elapsed_ms(started),
+                                       error_type="cf_blocked", error_message="Cloudflare 明确拒绝访问")
                 if last_status == 200 and body:
                     return FetchResult(
                         url=url,

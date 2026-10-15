@@ -100,10 +100,10 @@ class X1080XBackfillTests(unittest.TestCase):
     def _urls(self):
         base = "https://agaghhh.cc/forum.php"
         return {
-            "list1": f"{base}?mod=forumdisplay&fid=244&archiver=1&page=1&filter=typeid&typeid=5479",
-            "list2": f"{base}?mod=forumdisplay&fid=244&archiver=1&page=2&filter=typeid&typeid=5479",
-            "detail1001": f"{base}?mod=viewthread&tid=1001&archiver=1",
-            "detail1002": f"{base}?mod=viewthread&tid=1002&archiver=1",
+            "list1": f"{base}?mod=forumdisplay&fid=244&page=1&filter=typeid&typeid=5479&orderby=dateline",
+            "list2": f"{base}?mod=forumdisplay&fid=244&page=2&filter=typeid&typeid=5479&orderby=dateline",
+            "detail1001": f"{base}?mod=viewthread&tid=1001",
+            "detail1002": f"{base}?mod=viewthread&tid=1002",
         }
 
     def test_backfills_page_range_and_advances_checkpoint(self):

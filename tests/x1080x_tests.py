@@ -12,7 +12,7 @@ from util.resource_clock import fingerprint
 TYPE_MAP = {"5479": "中文字幕", "5206": "亚洲有码"}
 
 LIST_HTML = """
-<html><body><div id="content">
+<html><body><div id="threadlist">
   <a href="forum.php?mod=viewthread&amp;tid=1001&amp;archiver=1">ABC-001 标题一</a>
   <a href="thread-1002-1-1.html">ABC-002 标题二</a>
   <a href="forum.php?mod=viewthread&amp;tid=1001&amp;archiver=1">重复链接</a>
@@ -20,7 +20,7 @@ LIST_HTML = """
 </div></body></html>
 """.encode("utf-8")
 
-EMPTY_LIST_HTML = b'<html><body><div id="content"></div></body></html>'
+EMPTY_LIST_HTML = '<html><body><div id="threadlist">本版块或指定的范围内尚无主题</div></body></html>'.encode('utf-8')
 
 UNAVAILABLE_HTML = "<html><head><title>提示</title></head><body>archiver 功能没有开</body></html>".encode("utf-8")
 
@@ -195,7 +195,7 @@ class X1080XSourceTests(unittest.TestCase):
         target = discovery.targets[0]
         self.assertEqual("1001", target.key)
         self.assertEqual(
-            "https://agaghhh.cc/forum.php?mod=viewthread&tid=1001&archiver=1",
+            "https://agaghhh.cc/forum.php?mod=viewthread&tid=1001",
             target.url,
         )
         self.assertEqual(
@@ -417,9 +417,9 @@ class X1080XNotificationTests(unittest.TestCase):
         }
         base = "https://agaghhh.cc/forum.php"
         scraper.http = FakeHttp({
-            f"{base}?mod=forumdisplay&fid=244&archiver=1&page=1&filter=typeid&typeid=5479": LIST_HTML,
-            f"{base}?mod=viewthread&tid=1001&archiver=1": DETAIL_HTML,
-            f"{base}?mod=viewthread&tid=1002&archiver=1": DETAIL_HTML,
+            f"{base}?mod=forumdisplay&fid=244&page=1&filter=typeid&typeid=5479&orderby=dateline": LIST_HTML,
+            f"{base}?mod=viewthread&tid=1001": DETAIL_HTML,
+            f"{base}?mod=viewthread&tid=1002": DETAIL_HTML,
         })
         scraper.failure_store = NullFailureStore()
 

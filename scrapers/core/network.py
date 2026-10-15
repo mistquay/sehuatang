@@ -4,7 +4,7 @@ import time
 from collections import OrderedDict, deque
 from urllib.parse import urlsplit
 
-from .cf_challenge import is_cf_challenge, is_rate_limited
+from .cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited
 
 
 WINDOW_SECONDS = 300
@@ -58,6 +58,8 @@ def response_outcome(status, body, error_type=None):
         return "network_error"
     if status == 407:
         return "proxy_auth"
+    if error_type == "cf_blocked" or is_cf_blocked(body):
+        return "restricted"
     if error_type in ("cf_challenge", "r18_challenge"):
         return "challenge"
     if is_cf_challenge(body, status):
