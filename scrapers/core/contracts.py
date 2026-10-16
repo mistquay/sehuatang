@@ -88,6 +88,8 @@ class FailureStore(Protocol):
 
     def due_targets(self, source: str) -> List[CrawlTarget]: ...
 
+    def non_retryable_keys(self, source: str, keys: Iterable[str]) -> set[str]: ...
+
 
 class NullFailureStore:
     def record(self, failures: Iterable[CrawlFailure]) -> None:
@@ -98,3 +100,6 @@ class NullFailureStore:
 
     def due_targets(self, source: str) -> List[CrawlTarget]:
         return []
+
+    def non_retryable_keys(self, source: str, keys: Iterable[str]) -> set[str]:
+        return set()

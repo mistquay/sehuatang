@@ -99,6 +99,18 @@ class JsonFailureStore:
             )
         return targets[:500]
 
+    def non_retryable_keys(self, source: str, keys: Iterable[str]) -> set[str]:
+        key_set = set(keys)
+        if not key_set:
+            return set()
+        with self._lock, FileLock(str(self.path) + ".lock"):
+            return {row["source_key"] for row in self._load()
+                    if row.get("source") == source
+                    and row.get("source_key") in key_set
+                    and not row.get("resolved_at")
+                    and row.get("error_type") in NON_RETRYABLE_ERRORS
+                    and row.get("next_retry_at") is None}
+
     def snapshot(self, source=None, state=None, limit=100):
         now = datetime.now(timezone.utc)
         maximum = max_failures()

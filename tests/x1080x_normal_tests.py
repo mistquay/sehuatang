@@ -19,6 +19,7 @@ from scrapers.sources.x1080x.parser import ListValidationError, X1080XParser
 from scrapers.sources.x1080x.source import X1080XSource
 from tests import crawler_core_tests as core_tests
 from tests import page_backfill_tests as backfill_tests
+from tests import x1080x_tests
 from tests.x1080x_tests import DETAIL_HTML, DETAIL_HTML_NO_MAGNET, EMPTY_LIST_HTML, LIST_HTML
 from util.failure_policy import describe_failure
 
@@ -193,6 +194,36 @@ class BlockedResponseTests(unittest.TestCase):
 
 
 class NonRetryableLedgerTests(unittest.TestCase):
+    def test_non_retryable_lookup_is_scoped_and_requeue_restores_eligibility(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = JsonFailureStore(Path(root) / 'failures.json')
+            store.record([
+                CrawlFailure('x1080x', 'locked', 'u', 'parse', 1, 'membership_required'),
+                CrawlFailure('x1080x', 'blocked', 'u', 'fetch', 1, 'cf_blocked'),
+                CrawlFailure('x1080x', 'ordinary', 'u', 'parse', 1, 'missing_magnet'),
+                CrawlFailure('javbee', 'other', 'u', 'parse', 1, 'membership_required'),
+            ])
+            keys = ['locked', 'blocked', 'ordinary', 'other', 'new']
+            self.assertEqual({'locked', 'blocked'}, store.non_retryable_keys('x1080x', keys))
+            self.assertEqual(set(), store.non_retryable_keys('x1080x', ['new']))
+            store.requeue('x1080x', 'locked', 'parse')
+            self.assertEqual({'blocked'}, store.non_retryable_keys('x1080x', keys))
+            store.clear('x1080x', ['blocked'])
+            self.assertEqual(set(), store.non_retryable_keys('x1080x', keys))
+
+    def test_mongo_lookup_queries_only_unresolved_restricted_candidate_keys(self):
+        from util.mongo import find_non_retryable_crawl_keys
+        collection = Mock()
+        collection.find.return_value = [{'source_key': '1'}, {'source_key': '1'}]
+        self.assertEqual({'1'}, find_non_retryable_crawl_keys('x1080x', ['1', '1', '2'], collection))
+        collection.find.assert_called_once_with({
+            'source': 'x1080x', 'source_key': {'$in': ['1', '2']}, 'resolved_at': None,
+            'error_type': {'$in': ['membership_required', 'cf_blocked']}, 'next_retry_at': None,
+        }, {'_id': 0, 'source_key': 1})
+        collection.reset_mock()
+        self.assertEqual(set(), find_non_retryable_crawl_keys('x1080x', [], collection))
+        collection.find.assert_not_called()
+
     def test_json_preserves_reason_and_allows_explicit_requeue(self):
         with tempfile.TemporaryDirectory() as root:
             store = JsonFailureStore(Path(root) / 'failures.json')
@@ -213,3 +244,48 @@ class NonRetryableLedgerTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         self.assertEqual('due', describe_failure({'error_type': 'membership_required',
             'failure_count': 1, 'next_retry_at': now}, 5, now)['state'])
+
+
+class RestrictedIncrementalTests(unittest.TestCase):
+    _scraper = x1080x_tests.X1080XNotificationTests._scraper
+    _restore = x1080x_tests.X1080XNotificationTests._restore
+
+    def test_repeated_discovery_skips_locked_post_but_keeps_new_posts_and_manual_retry(self):
+        scraper = self._scraper([])
+        with tempfile.TemporaryDirectory() as root:
+            store = JsonFailureStore(Path(root) / 'failures.json')
+            scraper.failure_store = store
+            source = X1080XSource(scraper.config)
+            locked_url = source.detail_url(1001)
+            scraper.http.pages[locked_url] = LOCKED
+            with patch.object(scraper.http, 'fetch', wraps=scraper.http.fetch) as fetch:
+                first = scraper.crawl()
+                self.assertEqual((1, 1, 0), (first['saved'], first['membership_required'], first['skipped_restricted']))
+                row = store.snapshot()['failures'][0]
+                fetch.reset_mock()
+                with patch('scrapers.x1080x_scraper.find_existing_x1080x_keys', return_value={'1002'}):
+                    second = scraper.crawl()
+                self.assertEqual((0, 1, 1, 0), (second['requested'], second['existing'], second['skipped_restricted'], second['failed']))
+                self.assertEqual(row, store.snapshot()['failures'][0])
+                self.assertNotIn(locked_url, [call.args[0] for call in fetch.call_args_list])
+                # 新帖继续正常入库，不受已停止旧帖影响。
+                scraper.http.pages[source.list_url('5479', 1)] = list_page(1, 1, (1001, 1002, 1003))
+                scraper.http.pages[source.detail_url(1003)] = DETAIL_HTML
+                with patch('scrapers.x1080x_scraper.find_existing_x1080x_keys', return_value={'1002'}):
+                    third = scraper.crawl()
+                self.assertEqual((1, 1, 1), (third['requested'], third['saved'], third['skipped_restricted']))
+                # 取得权限后手动重新入队，失败重试仍会真实请求并清理成功台账。
+                store.requeue('x1080x', '1001', 'parse')
+                scraper.http.pages[locked_url] = DETAIL_HTML
+                retried = scraper.crawl(retry_failed=True)
+                self.assertEqual((1, 1), (retried['requested'], retried['saved']))
+                self.assertEqual([], store.snapshot()['failures'])
+
+    def test_explicit_refresh_all_can_recheck_restricted_posts(self):
+        scraper = self._scraper([])
+        with tempfile.TemporaryDirectory() as root:
+            scraper.failure_store = JsonFailureStore(Path(root) / 'failures.json')
+            scraper.failure_store.record([CrawlFailure('x1080x', '1001', 'u', 'parse', 1, 'membership_required')])
+            scraper.config['refresh_all'] = True
+            result = scraper.crawl()
+            self.assertEqual((2, 2, 0), (result['requested'], result['saved'], result['skipped_restricted']))

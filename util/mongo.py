@@ -365,6 +365,19 @@ def clear_crawl_failures(source, source_keys, collection=None):
     )
 
 
+def find_non_retryable_crawl_keys(source, source_keys, collection=None):
+    keys = list(dict.fromkeys(source_keys))
+    if not keys:
+        return set()
+    if collection is None:
+        collection = get_crawl_failure_collection()
+    rows = collection.find({
+        "source": source, "source_key": {"$in": keys}, "resolved_at": None,
+        "error_type": {"$in": list(NON_RETRYABLE_ERRORS)}, "next_retry_at": None,
+    }, {"_id": 0, "source_key": 1})
+    return {row["source_key"] for row in rows}
+
+
 def find_due_crawl_failures(source, now=None, collection=None, limit=500):
     if collection is None:
         collection = get_crawl_failure_collection()

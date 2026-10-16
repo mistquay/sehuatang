@@ -62,6 +62,7 @@ class X1080XScraper:
             save_func=save_x1080x_items,
             refresh_all=bool(self.config.get("refresh_all", False)),
             on_saved=self._enqueue_new_items if notify else None,
+            non_retryable_lookup=lambda keys: self.failure_store.non_retryable_keys("x1080x", keys),
         )
         summary = CrawlEngine(self.http, self.failure_store, getattr(self, "storage_settings", None)).run(
             source,
@@ -70,11 +71,13 @@ class X1080XScraper:
             retry_failed=retry_failed,
         )
         summary.details["existing"] = repository.existing_count
+        summary.details["skipped_restricted"] = repository.skipped_restricted
         result = summary.as_dict()
         log.info(
             "x1080x 抓取汇总: "
             f"status={result['status']} pages={result.get('pages', 0)} "
             f"discovered={result['discovered']} existing={result['existing']} "
+            f"skipped_restricted={result['skipped_restricted']} "
             f"requested={result['requested']} failed={result['failed']} "
             f"saved={result['saved']} updated={result['updated']}"
         )

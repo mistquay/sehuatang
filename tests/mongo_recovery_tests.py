@@ -9,6 +9,7 @@ from unittest import mock
 import pymongo
 
 from util.mongo import (find_due_crawl_failures, list_crawl_failures,
+                        find_non_retryable_crawl_keys,
                         record_crawl_failures, requeue_crawl_failure,
                         requeue_exhausted_crawl_failures)
 
@@ -76,9 +77,15 @@ class MongoRecoveryTests(unittest.TestCase):
             self.assertEqual(1, row["failure_count"])
             self.assertIsNone(row["next_retry_at"])
         self.assertEqual([], find_due_crawl_failures("x1080x", collection=self.collection))
+        self.assertEqual({'membership_required', 'cf_blocked'}, find_non_retryable_crawl_keys(
+            'x1080x', ['membership_required', 'cf_blocked', 'new'], self.collection))
+        self.assertEqual(set(), find_non_retryable_crawl_keys(
+            'javbee', ['membership_required', 'cf_blocked'], self.collection))
         self.assertEqual(2, list_crawl_failures(collection=self.collection)["counts"]["exhausted"])
         self.assertEqual(2, requeue_exhausted_crawl_failures("x1080x", self.collection))
         self.assertEqual(2, len(find_due_crawl_failures("x1080x", collection=self.collection)))
+        self.assertEqual(set(), find_non_retryable_crawl_keys(
+            'x1080x', ['membership_required', 'cf_blocked'], self.collection))
         self.assertEqual(0, requeue_exhausted_crawl_failures("x1080x", self.collection))
 
     def test_stage_transition_keeps_original_retry_budget(self):

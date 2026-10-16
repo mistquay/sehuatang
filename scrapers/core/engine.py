@@ -173,8 +173,10 @@ class CrawlEngine:
                               else type(exc).__name__.lower())
                 if error_type == "membership_required":
                     summary.details["membership_required"] = summary.details.get("membership_required", 0) + 1
+                message = ("详情下载受会员权限限制（保留台账，停止自动重试）"
+                           if error_type == "membership_required" else "详情解析异常")
                 logger.warning(
-                    "详情解析异常: "
+                    f"{message}: "
                     f"run_id={context.run_id} source={source.name} "
                     f"target={target.key} error_type={error_type}"
                 )

@@ -4,6 +4,7 @@ from scrapers.core.contracts import CrawlFailure, CrawlTarget
 from util.mongo import (
     clear_crawl_failures,
     find_due_crawl_failures,
+    find_non_retryable_crawl_keys,
     record_crawl_failures,
     list_crawl_failures,
     requeue_crawl_failure,
@@ -12,6 +13,9 @@ from util.mongo import (
 
 
 class MongoFailureStore:
+    def non_retryable_keys(self, source: str, keys: Iterable[str]) -> set[str]:
+        return find_non_retryable_crawl_keys(source, keys)
+
     def snapshot(self, source=None, state=None, limit=100):
         return list_crawl_failures(source=source, state=state, limit=limit)
 
