@@ -89,7 +89,8 @@ def login_in_browser(client, settings, resource_id):
     except SourcePaused:
         raise
     except ImportError:
-        raise SourcePaused("browser_unavailable", "x1080x 需要无头登录运行时，请安装 requirements-auth.txt 并安装 Firefox 浏览器") from None
+        raise SourcePaused("browser_unavailable", "x1080x 自动登录缺少浏览器运行时：请在管理页填写手动 Cookie，"
+                           "或使用 WITH_X1080X_BROWSER=true 构建镜像并安装浏览器") from None
     except Exception as exc:
         # 浏览器异常可能包含输入内容、请求参数或 Cookie；只报告异常类型。
         raise SourcePaused("authentication_failed", f"x1080x 无头登录未完成（{type(exc).__name__}）；本轮暂停") from None

@@ -74,9 +74,17 @@ class X1080XScraper:
         summary.details["existing"] = repository.existing_count
         summary.details["skipped_restricted"] = repository.skipped_restricted
         result = summary.as_dict()
+        if result["skipped_restricted"] and not result["requested"]:
+            log.warning(
+                "x1080x 本轮没有待请求详情："
+                f"existing={result['existing']} 是已入库数量，"
+                f"skipped_restricted={result['skipped_restricted']} 是权限/价格/封锁失败台账的跳过数量；"
+                "请在失败台账查看原因，访问权限确已变化后再重新入队"
+            )
         log.info(
             "x1080x 抓取汇总: "
             f"status={result['status']} pages={result.get('pages', 0)} "
+            f"partitions={len(source.type_map)} free_boards={len(source.boards)} "
             f"discovered={result['discovered']} existing={result['existing']} "
             f"skipped_restricted={result['skipped_restricted']} "
             f"requested={result['requested']} failed={result['failed']} "
