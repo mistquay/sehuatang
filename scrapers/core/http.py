@@ -1,4 +1,5 @@
 import random
+import re
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -26,6 +27,7 @@ _SENSITIVE_QUERY_KEYS = {
     "secret",
     "signature",
     "token",
+    "browser_key",
 }
 
 
@@ -44,7 +46,8 @@ def redact_url(url: str) -> str:
             for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         ]
     )
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    path = re.sub(r"(/api/downloads/file/)[^/]+", r"\1***", parsed.path)
+    return urlunsplit((parsed.scheme, netloc, path, query, parsed.fragment))
 
 
 class CrawlerHttpClient:

@@ -5,7 +5,7 @@ from util.read_config import get_config
 
 
 # 权限不会随短时退避恢复；保留台账，允许用户取得权限后手动重入队。
-NON_RETRYABLE_ERRORS = ("membership_required", "cf_blocked")
+NON_RETRYABLE_ERRORS = ("membership_required", "cf_blocked", "paid_resource")
 
 
 def retry_stopped(row, maximum):

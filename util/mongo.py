@@ -585,14 +585,14 @@ def find_existing_x1080x_keys(source_keys, collection=None):
 
 
 def save_x1080x_items(data_list, collection=None):
-    """按帖子 tid 幂等写入 x1080x_items，时钟语义与 javbee_items 一致。"""
+    """按 source_key 幂等写入 x1080x_items，兼容已有数字 tid 记录。"""
     if not data_list:
         return {"processed": 0, "matched": 0, "modified": 0, "upserted": 0}
     if collection is None:
         collection = get_x1080x_collection()
 
     for item in data_list:
-        for required in ("source_key", "tid", "title", "date"):
+        for required in ("source_key", "title", "date"):
             if not item.get(required):
                 raise ValueError(
                     f"x1080x 数据缺少 {required}: {item.get('url') or item}"

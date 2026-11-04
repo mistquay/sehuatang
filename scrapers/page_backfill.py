@@ -91,6 +91,10 @@ class FixedTargetSource:
     def parse_detail(self, target, result):
         return self._source.parse_detail(target, result)
 
+    def collect_detail(self, target, result, http, context):
+        collect = getattr(self._source, "collect_detail", None)
+        return collect(target, result, http, context) if collect else self.parse_detail(target, result)
+
 
 class MongoPageCheckpointStore:
     def __init__(self, collection, scope):

@@ -26,7 +26,14 @@ def configured_pools(config):
             settings = load_source_settings({source: raw, "crawler": {
                 "defaults": (config.get("crawler") or {}).get("defaults") or {},
                 "sources": {source: raw}}}, source)
-            pool = shared_pool(source, settings, target)
+            if source == "x1080x":
+                from scrapers.sources.x1080x.http_client import shared_http_client as x1080x_http_client
+                endpoint = (os.getenv("CRAWLER_X1080X_FLARESOLVERR_URL")
+                            or (raw.get("challenge") or {}).get("flaresolverr_url") or "").strip()
+                pool = x1080x_http_client(settings, endpoint, target,
+                    config={**raw, "cookie": os.getenv("CRAWLER_X1080X_COOKIE", raw.get("cookie", ""))})
+            else:
+                pool = shared_pool(source, settings, target)
         for lane in pool.lanes:
             lane.network.register_target(target)
         pools[source] = (pool, target)

@@ -372,7 +372,7 @@ def create_argument_parser():
     parser.add_argument(
         "--typeid",
         action="append",
-        help="backfill-pages(x1080x): 分类 typeid，可重复指定；不传则全部分类"
+        help="backfill-pages(x1080x): 新版 category_id 或独立 board_id，可重复指定；不传则全部配置分区"
     )
 
     return parser

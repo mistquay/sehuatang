@@ -195,6 +195,7 @@ class SessionHttpClient:
         """来源插件可在首次请求或检测前应用配置 Cookie。"""
 
     def _request_with_cookies(self, url: str, **kwargs):
+        method = kwargs.pop("_method", "GET")
         self._prepare_cookies(url)
         self._local.network_timing = None
         # 每次真实请求（包括 transport 内部重试）先检查会话和来源的间隔。
@@ -217,7 +218,8 @@ class SessionHttpClient:
         session.cookies.clear()
         started = time.monotonic()
         try:
-            response = session.get(url, cookies=cookies, headers=headers, **kwargs)
+            request = session.get if method == "GET" else session.post
+            response = request(url, cookies=cookies, headers=headers, **kwargs)
         finally:
             self._local.network_timing = (started, max(0, int((time.monotonic() - started) * 1000)))
         if not is_cf_blocked(response.content) and (is_rate_limited(response.content)
@@ -399,10 +401,14 @@ class SessionHttpClient:
             domain = item.get("domain") or host
             expires = item.get("expires")
             expires = int(expires) if expires and expires > 0 else None
+            # 浏览器导出的无前导点域名是 host-only。误标 Domain 会被 libcurl
+            # 拒收所有 __Host- Cookie，导致账号/BrowserPass 看似导入但未发送。
+            domain_cookie = domain.startswith(".") and not name.startswith("__Host-")
             self._jar.jar.set_cookie(Cookie(0, name, str(item.get("value", "")),
-                None, False, domain, bool(item.get("domain")), domain.startswith("."),
+                None, False, domain.lstrip(".") if name.startswith("__Host-") else domain,
+                domain_cookie, domain_cookie,
                 item.get("path") or "/", True, bool(item.get("secure")), expires,
-                expires is None, None, None, {}, False))
+                expires is None, None, None, {"HttpOnly": True} if item.get("httpOnly") else {}, False))
 
     def _sleep(self, seconds):
         from .rate_limit import CrawlStopped

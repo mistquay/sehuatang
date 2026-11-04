@@ -98,12 +98,13 @@ class X1080XBackfillTests(unittest.TestCase):
         module.save_x1080x_items = self._orig_save
 
     def _urls(self):
-        base = "https://agaghhh.cc/forum.php"
+        from scrapers.sources.x1080x.source import X1080XSource
+        source = X1080XSource({"base_url": "https://agaghhh.cc", "typeids": TYPE_MAP})
         return {
-            "list1": f"{base}?mod=forumdisplay&fid=244&page=1&filter=typeid&typeid=5479&orderby=dateline",
-            "list2": f"{base}?mod=forumdisplay&fid=244&page=2&filter=typeid&typeid=5479&orderby=dateline",
-            "detail1001": f"{base}?mod=viewthread&tid=1001",
-            "detail1002": f"{base}?mod=viewthread&tid=1002",
+            "list1": source.list_url("5479", 1),
+            "list2": source.list_url("5479", 2),
+            "detail1001": source.detail_url("1001"),
+            "detail1002": source.detail_url("1002"),
         }
 
     def test_backfills_page_range_and_advances_checkpoint(self):

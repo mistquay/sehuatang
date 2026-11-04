@@ -1,10 +1,7 @@
-"""解析 x1080x 普通 Discuz 页面，保留旧 archiver 样本的详情兼容。
-
-选择器同时覆盖 archiver 简化页和普通页两套 DOM，
-以兼容站点在不同镜像/版本间的差异。
-"""
+"""新版列表和首帖解析；旧 HTML 解码仅用于已有离线样本。"""
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -37,7 +34,7 @@ class ListValidationError(ValueError):
 
 @dataclass(frozen=True)
 class ListPage:
-    tids: List[int]
+    tids: List[int | str]
     last_page: Optional[int] = None
 
 
@@ -71,6 +68,13 @@ class X1080XParser:
     def parse_list(self, html_content: bytes) -> List[int]:
         """从列表页提取帖子 tid（保持页面顺序、去重）。"""
         soup = BeautifulSoup(html_content, "html.parser")
+        if soup.select_one(".thread-list"):
+            ids = []
+            for node in soup.select(".thread-list article:not(.is-sticky) a.resource-title[href]"):
+                match = re.fullmatch(r"/resources/([0-9A-Za-z]{22})", urlparse(node["href"]).path)
+                if match:
+                    ids.append(match.group(1))
+            return _ordered_unique(ids)
         if self.is_unavailable(soup, soup.get_text(" ", strip=True)[:2000]):
             return []
 
@@ -96,6 +100,8 @@ class X1080XParser:
         if is_cf_blocked(html_content) or is_cf_challenge(html_content, 200) or is_rate_limited(html_content):
             raise ListValidationError("列表响应为验证或受限页面")
         soup = BeautifulSoup(html_content, "html.parser")
+        if soup.select_one(".thread-list"):
+            return self._parse_resource_list(soup, html_content, expected_page)
         scope = soup.select_one("#threadlist")
         if scope is None or self.is_unavailable(soup, soup.get_text(" ", strip=True)[:2000]):
             raise ListValidationError("缺少普通列表结构或站点不可用")
@@ -135,6 +141,96 @@ class X1080XParser:
             if last_page is not None and last_page > expected_page:
                 raise ListValidationError("末页之前出现空列表")
         return ListPage(tids, last_page)
+
+    def _parse_resource_list(self, soup, body, expected_page):
+        current_pages, last_pages = set(), set()
+        for pager in soup.select(".thread-list .pg"):
+            current = pager.select_one("strong")
+            jump = pager.select_one('input[type="number"][max]')
+            if not current or not current.get_text(strip=True).isdigit() or not jump:
+                raise ListValidationError("新版分页缺少当前页或末页")
+            maximum = str(jump.get("max", ""))
+            if not maximum.isdigit():
+                raise ListValidationError("新版分页末页无效")
+            current_pages.add(int(current.get_text(strip=True)))
+            last_pages.add(int(maximum))
+        if current_pages != {expected_page} or len(last_pages) != 1:
+            raise ListValidationError("新版分页与请求页不一致")
+        last = next(iter(last_pages))
+        if last < expected_page:
+            raise ListValidationError("请求页超过末页")
+        ids = self.parse_list(body)
+        if not ids:
+            empty = soup.select_one(".thread-list .empty-state")
+            if not empty or not any(word in empty.get_text() for word in ("沒有", "暂无", "暫無", "没有")):
+                raise ListValidationError("新版列表为空且没有空列表提示")
+        return ListPage(ids, last)
+
+    def parse_resource(self, html_content, detail_url, *, resource_id, board_id="",
+                       category_id="", section=""):
+        soup = BeautifulSoup(html_content, "html.parser")
+        # 已保存的旧 HTML 仍可离线解析，采集 URL 不再使用 Discuz。
+        if soup.select_one("#thread_subject, #nav"):
+            return self.parse_detail(html_content, detail_url, tid=resource_id,
+                                     fid=244, typeid=category_id, section=section, strict=True)
+        title_node = soup.select_one(".thread-header h1")
+        if title_node is None:
+            raise DetailValidationError("page_unavailable" if self.is_unavailable(soup, soup.get_text()[:2000]) else "missing_title")
+        category = title_node.select_one('a.topic-category[href]')
+        if category:
+            category_id = parse_qs(urlparse(category["href"]).query).get("category_id", [category_id])[0]
+        for tag in title_node.select(".topic-tags"):
+            tag.decompose()
+        title = title_node.get_text(" ", strip=True)
+        if not title:
+            raise DetailValidationError("missing_title")
+        post = soup.select_one("#first-post")
+        if post is None:
+            raise DetailValidationError("login_required")
+        stamp = post.select_one("time[datetime]")
+        try:
+            published = datetime.fromisoformat(stamp["datetime"].replace("Z", "+00:00")) if stamp else None
+            if published is None or published.tzinfo is None:
+                raise ValueError()
+            published = published.astimezone(timezone(timedelta(hours=8)))
+        except (ValueError, TypeError, KeyError):
+            raise DetailValidationError("missing_date") from None
+        content = post.select_one(".post-text")
+        if content is None:
+            raise DetailValidationError("missing_content")
+        raw, text = content.decode_contents(), content.get_text("\n", strip=True)
+        magnets = self._extract_magnets(raw, text)
+        slots = []
+        for attachment in content.select(".attachment[data-slot-id]"):
+            name = attachment.select_one(".file-name")
+            if name and name.get_text(strip=True).lower().endswith(".torrent"):
+                slots.append(str(attachment["data-slot-id"]))
+        if not magnets and content.select_one(".body-locked"):
+            locked = content.select_one(".body-locked").get_text(" ", strip=True)
+            requires_login = any(w in locked for w in ("登入", "登录", "登錄"))
+            reason = ("membership_required" if not requires_login and any(
+                w in locked.upper() for w in ("VIP", "會員", "会员", "6小時", "6小时")) else "login_required")
+            raise DetailValidationError(reason)
+        nav = soup.select_one(".breadcrumb")
+        if nav:
+            for anchor in nav.select('a[href^="/boards/"]'):
+                match = re.fullmatch(r"/boards/([0-9A-Za-z]{22})", urlparse(anchor["href"]).path)
+                if match:
+                    board_id = match.group(1)
+        resolution = resolve_x1080x_code(title, magnets)
+        return {
+            "source_key": str(resource_id), "resource_id": str(resource_id),
+            "board_id": board_id, "category_id": category_id,
+            "section": section or self.type_map.get(category_id, ""),
+            "title": title, "code": resolution.code,
+            "code_normalized": normalize_code_key(resolution.code),
+            "code_source": resolution.source, "code_confidence": resolution.confidence,
+            "date": published.strftime("%Y-%m-%d"),
+            "post_time": published.strftime("%Y-%m-%d %H:%M:%S"), "url": detail_url,
+            "magnet": magnets[0] if magnets else None, "magnets": magnets,
+            "img": self._extract_images(content, raw, detail_url),
+            "attachment_slots": _ordered_unique(slots),
+        }
 
     def parse_detail(
         self,

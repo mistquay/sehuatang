@@ -11,6 +11,7 @@ from .contracts import (
     DetailValidationError,
     FailureStore,
     NullFailureStore,
+    SourcePaused,
     RecordRepository,
     SourceAdapter,
 )
@@ -54,13 +55,19 @@ class CrawlEngine:
         started = time.monotonic()
         summary = RunSummary(source=source.name, run_id=context.run_id)
 
-        if retry_failed:
-            discovery = DiscoveryResult(
-                targets=self.failure_store.due_targets(source.name),
-                details={"retry_failed": True},
-            )
-        else:
-            discovery = source.discover(context, self.http)
+        try:
+            if retry_failed:
+                discovery = DiscoveryResult(
+                    targets=self.failure_store.due_targets(source.name),
+                    details={"retry_failed": True},
+                )
+            else:
+                discovery = source.discover(context, self.http)
+        except SourcePaused as exc:
+            summary.failed = 1
+            summary.details.update(source_paused=exc.reason)
+            logger.warning(str(exc))
+            return summary
         summary.discovered = len(discovery.targets)
         summary.failed = discovery.failed
         summary.details.update(discovery.details)
@@ -74,7 +81,14 @@ class CrawlEngine:
         targets = list({target.key: target for target in targets}.values())
         normalize = getattr(source, "normalize_target", None)
         if normalize is not None:
-            targets = [normalize(target) for target in targets]
+            normalized = []
+            for target in targets:
+                current = normalize(target)
+                if current is None:
+                    summary.details["legacy_targets_skipped"] = summary.details.get("legacy_targets_skipped", 0) + 1
+                else:
+                    normalized.append(current)
+            targets = normalized
         summary.requested = len(targets)
 
         def persist(items):
@@ -102,11 +116,15 @@ class CrawlEngine:
                 for index, result in completed_results(self.http, [target.url for target in batch], writer.failed):
                     writer.check()
                     self._process_batch(context, source, [batch[index]], summary, [result], writer)
+                    if summary.details.get("source_paused"):
+                        break
                 if summary.details.get("rate_limited") and (
                     not hasattr(type(self.http), "all_cooling") or self.http.all_cooling
                 ):
                     break
                 if summary.details.get("cf_blocked"):
+                    break
+                if summary.details.get("source_paused"):
                     break
         summary.details.update(write_batches=writer.batches, persist_ms=writer.persist_ms,
                                write_queue_wait_ms=writer.queue_wait_ms)
@@ -144,6 +162,10 @@ class CrawlEngine:
                 # 站点级暂时阻塞不计入单帖失败次数；补抓客户端会在返回前恢复。
                 continue
             if not result.ok:
+                if result.error_type == "session_paused":
+                    summary.failed += 1
+                    summary.details["source_paused"] = result.error_message
+                    break
                 if result.error_type == "cf_blocked":
                     summary.details["cf_blocked"] = True
                 failures.append(
@@ -167,12 +189,21 @@ class CrawlEngine:
                 continue
 
             try:
-                record = source.parse_detail(target, result)
+                collect = getattr(source, "collect_detail", None)
+                record = (collect(target, result, self.http, context) if collect
+                          else source.parse_detail(target, result))
+            except SourcePaused as exc:
+                summary.failed += 1
+                summary.details["source_paused"] = exc.reason
+                logger.warning(str(exc))
+                break
             except Exception as exc:
                 error_type = (exc.reason if isinstance(exc, DetailValidationError)
                               else type(exc).__name__.lower())
                 if error_type == "membership_required":
                     summary.details["membership_required"] = summary.details.get("membership_required", 0) + 1
+                if error_type == "paid_resource":
+                    summary.details["paid_resource"] = summary.details.get("paid_resource", 0) + 1
                 message = ("详情下载受会员权限限制（保留台账，停止自动重试）"
                            if error_type == "membership_required" else "详情解析异常")
                 logger.warning(
@@ -212,6 +243,8 @@ class CrawlEngine:
                 )
                 continue
             records.append(record)
+            if record.payload.get("download_pending"):
+                summary.details["attachment_pending"] = summary.details.get("attachment_pending", 0) + 1
 
         summary.succeeded += len(records)
         summary.failed += len(failures)

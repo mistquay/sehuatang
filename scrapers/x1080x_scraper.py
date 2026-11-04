@@ -43,6 +43,7 @@ class X1080XScraper:
             self.settings,
             _resolve_flaresolverr_url(self.config),
             self.config.get("base_url") or DEFAULT_BASE_URL,
+            config={**self.config, "cookie": os.getenv("CRAWLER_X1080X_COOKIE", self.config.get("cookie", ""))},
         )
         self.failure_store = failure_store or build_failure_store(
             mongodb_enabled=bool(get_config("mongodb.enable", False))
@@ -115,7 +116,7 @@ class X1080XScraper:
         engine = CrawlEngine(http, self.failure_store, getattr(self, "storage_settings", None))
         checkpoints = checkpoint_store or build_checkpoint_store(
             "x1080x", start_page, end_page, source.base_url,
-            f"fid={source.fid};normal;orderby=dateline;v1")
+            f"board={source.board_id};resources;v2")
 
         selected = {
             str(typeid): source.type_map[str(typeid)]
@@ -169,6 +170,8 @@ class X1080XScraper:
                     )
                     if result.error_type == "cf_blocked":
                         summary["stopped"] = "cf_blocked"
+                    elif result.error_type == "session_paused":
+                        summary["stopped"] = result.error_message or "session_unavailable"
                     break
 
                 tids = parsed.tids
@@ -188,18 +191,7 @@ class X1080XScraper:
                     if tid in seen_tids:
                         continue
                     seen_tids.add(tid)
-                    targets.append(
-                        CrawlTarget(
-                            key=str(tid),
-                            url=source.detail_url(tid),
-                            partition=typeid,
-                            metadata={
-                                "tid": tid,
-                                "typeid": typeid,
-                                "section": section,
-                            },
-                        )
-                    )
+                    targets.append(source.make_target(tid, typeid, section))
 
                 page_run = engine.run(
                     FixedTargetSource(source, targets),
@@ -217,8 +209,9 @@ class X1080XScraper:
                 partition_summary["saved"] += page_run.saved
                 partition_summary["failed"] += page_run.failed
 
-                blocked = ("cf_blocked" if page_run.details.get("cf_blocked") else
-                           "membership_required" if page_run.details.get("membership_required") else "")
+                blocked = (page_run.details.get("source_paused") or (
+                    "cf_blocked" if page_run.details.get("cf_blocked") else
+                    "membership_required" if page_run.details.get("membership_required") else ""))
                 if blocked:
                     partition_summary["stopped"] = f"{blocked}@{page}"
                     summary["stopped"] = blocked

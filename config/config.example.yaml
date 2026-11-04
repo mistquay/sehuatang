@@ -34,20 +34,32 @@ javbee:
 
 x1080x:
   # 站点镜像域名频繁更换，可用 CRAWLER_X1080X_BASE_URL 覆盖
-  base_url: "https://agaghhh.cc"
-  fid: 244
-  # 每个分类的普通列表页数，按发帖时间倒序；根据发帖量覆盖两次轮询间的新帖
+  base_url: "https://1080xin.com"
+  board_id: "7RHPO2w4jFUYiDhDsxz0wE"
+  # 每个分类/板块扫描页数
   page_limit: 3
-  # typeid -> 分类名；站点分类调整时在此覆盖
-  typeids:
-    "5212": "国内成人"
-    "5206": "亚洲有码"
-    "5207": "亚洲无码"
-    "5208": "FC2"
-    "5216": "MGS"
-    "5479": "中文字幕"
-    "5213": "探花精选"
-    "5217": "主播精选"
+  categories:
+    "5CfYpFiXzzHoUtfJyFd3FV": "国内成人"
+    "7aUtFOJbmFXIMDEx8Smqkm": "亚洲有码"
+    "2lrSOyEwyacrCPS2aN7ZM6": "亚洲无码"
+    "1v7HJi1gXdgaOohKjlK9L0": "FC2"
+    "1RzNrulROCeqHTIW8wSADv": "MGS"
+    "6gGAPsMAGtQzqxIYyAQBbS": "中文字幕"
+    "0hbFa1xIVkbRIvm6oOYbff": "探花精选"
+    "7EHxTALDTN1Yn12YTGMjdY": "主播精选"
+  # 独立免费板块；只采集正文磁链或价格为零且不消耗配额的 torrent。
+  boards:
+    "3zfPdYrZvRsB5MYMHwE70K": "亚洲无码"
+    "5PDZcHM9127Cbn21wUhl1q": "亚洲有码"
+  auth:
+    mode: "auto" # HTTP 无法完成认证时使用独立无头浏览器；还支持 http/browser/disabled
+    # 推荐通过 CRAWLER_X1080X_USERNAME / CRAWLER_X1080X_PASSWORD 注入
+    username: ""
+    password: ""
+    headless: true
+    timeout: 120
+  # 可选 Cookie 导入（CRAWLER_X1080X_COOKIE）；已有有效登录会话时不重复登录。
+  cookie: ""
 
 # 多来源爬虫公共配置。来源配置覆盖 defaults。
 crawler:

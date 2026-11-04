@@ -15,6 +15,7 @@ __pycache__
 .tox
 .cache
 .mypy_cache
+.playwright-cli/
 
 # Virtual Environment
 venv/

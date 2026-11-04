@@ -195,11 +195,12 @@ class X1080XSourceTests(unittest.TestCase):
         target = discovery.targets[0]
         self.assertEqual("1001", target.key)
         self.assertEqual(
-            "https://agaghhh.cc/forum.php?mod=viewthread&tid=1001",
+            "https://agaghhh.cc/resources/1001?page=1&order=asc",
             target.url,
         )
         self.assertEqual(
-            {"tid": 1001, "typeid": "5479", "section": "中文字幕"},
+            {"resource_id": "1001", "board_id": source.board_id,
+             "category_id": "6gGAPsMAGtQzqxIYyAQBbS", "section": "中文字幕"},
             dict(target.metadata),
         )
 
@@ -415,11 +416,11 @@ class X1080XNotificationTests(unittest.TestCase):
             "typeids": {"5479": "中文字幕"},
             "page_limit": 1,
         }
-        base = "https://agaghhh.cc/forum.php"
+        source = X1080XSource(scraper.config)
         scraper.http = FakeHttp({
-            f"{base}?mod=forumdisplay&fid=244&page=1&filter=typeid&typeid=5479&orderby=dateline": LIST_HTML,
-            f"{base}?mod=viewthread&tid=1001": DETAIL_HTML,
-            f"{base}?mod=viewthread&tid=1002": DETAIL_HTML,
+            source.list_url("5479", 1): LIST_HTML,
+            source.detail_url("1001"): DETAIL_HTML,
+            source.detail_url("1002"): DETAIL_HTML,
         })
         scraper.failure_store = NullFailureStore()
 

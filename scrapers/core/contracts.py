@@ -11,6 +11,14 @@ class DetailValidationError(ValueError):
         super().__init__(message or reason)
 
 
+class SourcePaused(RuntimeError):
+    """来源会话不可用；停止本轮，不累计每个资源的失败次数。"""
+
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class CrawlContext:
     source: str

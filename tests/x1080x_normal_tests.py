@@ -83,7 +83,7 @@ class NormalParserTests(unittest.TestCase):
 
 
 class NormalSourceTests(unittest.TestCase):
-    def test_retry_rebuilds_old_domain_and_archiver_url_without_mutating_ledger(self):
+    def test_retry_does_not_guess_new_resource_id_for_old_discuz_tid(self):
         source = X1080XSource({'base_url': 'https://current.example'}, diagnostics=False)
         old = CrawlTarget('1001', 'https://old.example/forum.php?mod=viewthread&tid=1001&archiver=1',
                           metadata={'typeid': '5479', 'retry_stage': 'fetch'})
@@ -93,11 +93,11 @@ class NormalSourceTests(unittest.TestCase):
         http = backfill_tests.FakeHttp({url: DETAIL_HTML})
         repository = core_tests.CrawlEngineTests.FakeRepository()
         result = CrawlEngine(http, failures).run(source, repository, retry_failed=True)
-        self.assertEqual(1, result.saved)
-        self.assertEqual([url], http.fetched)
+        self.assertEqual(0, result.saved)
+        self.assertEqual(1, result.details['legacy_targets_skipped'])
+        self.assertEqual([], http.fetched)
         self.assertIn('archiver=1', old.url)
-        self.assertEqual(old.metadata, repository.saved_records[0].target.metadata)
-        self.assertEqual(url, repository.saved_records[0].payload['url'])
+        self.assertEqual([], repository.saved_records)
 
     def test_incremental_last_page_avoids_an_extra_request(self):
         source = X1080XSource({'typeids': {'5479': '中文字幕'}, 'page_limit': 3}, diagnostics=False)
@@ -107,7 +107,7 @@ class NormalSourceTests(unittest.TestCase):
         self.assertEqual(2, len(result.targets))
         self.assertEqual([url], http.fetched)
         self.assertNotIn('archiver', url)
-        self.assertIn('orderby=dateline', url)
+        self.assertIn('category_id=6gGAPsMAGtQzqxIYyAQBbS', url)
 
     def test_repeated_incremental_page_counts_as_failure(self):
         source = X1080XSource({'typeids': {'5479': '中文字幕'}}, diagnostics=False)
@@ -155,7 +155,7 @@ class NormalBackfillTests(backfill_tests.X1080XBackfillTests):
         scraper = self._scraper({})
         with patch('scrapers.x1080x_scraper.build_checkpoint_store', return_value=self.checkpoints) as build:
             scraper.backfill_pages(1, 1)
-        self.assertEqual('fid=244;normal;orderby=dateline;v1', build.call_args.args[-1])
+        self.assertEqual('board=7RHPO2w4jFUYiDhDsxz0wE;resources;v2', build.call_args.args[-1])
 
 
 class BlockedResponseTests(unittest.TestCase):
@@ -218,7 +218,7 @@ class NonRetryableLedgerTests(unittest.TestCase):
         self.assertEqual({'1'}, find_non_retryable_crawl_keys('x1080x', ['1', '1', '2'], collection))
         collection.find.assert_called_once_with({
             'source': 'x1080x', 'source_key': {'$in': ['1', '2']}, 'resolved_at': None,
-            'error_type': {'$in': ['membership_required', 'cf_blocked']}, 'next_retry_at': None,
+            'error_type': {'$in': ['membership_required', 'cf_blocked', 'paid_resource']}, 'next_retry_at': None,
         }, {'_id': 0, 'source_key': 1})
         collection.reset_mock()
         self.assertEqual(set(), find_non_retryable_crawl_keys('x1080x', [], collection))
