@@ -165,6 +165,7 @@ crawler:
         proxy:
           enabled: false
           url: ""
+          # 若继承全局 urls，账号/Cookie 模式会固定第一条；指定单线时需同时设置 urls: []。
       challenge:
         # 站点有 Cloudflare JS 挑战，必须配置 FlareSolverr 兼容服务
         # （docker 部署填 http://byparr:8191/v1，

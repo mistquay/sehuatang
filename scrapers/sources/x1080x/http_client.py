@@ -12,9 +12,12 @@ from scrapers.core.cf_challenge import is_cf_challenge, is_rate_limited, merge_s
 from scrapers.core.contracts import SourcePaused
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.core.models import FetchResult
+from scrapers.core.config import ProxySettings
+from scrapers.core.network import proxy_label
 from scrapers.core.session import SessionHttpClient
 from scrapers.core.pool import shared_pool, stop_shared_clients
 from .auth import Authenticator, AuthSettings
+from util.log_util import log
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,16 @@ def _factory(config_json, base_url):
     return partial(X1080XHttpClient, config=json.loads(config_json), base_url=base_url)
 
 
+@lru_cache(maxsize=16)
+def _fixed_account_lane(settings):
+    """账号会话固定到首条线路，避免继承全局代理池时阻断来源与监测页。"""
+    proxy = settings.proxy.addresses[0]
+    log.bind(module="x1080x").warning(
+        f"x1080x 账号会话固定使用首条代理: {proxy_label(proxy)}；"
+        "其他来源继续使用原代理池；可在 crawler.sources.x1080x.http.proxy 单独指定线路")
+    return replace(settings, proxy=ProxySettings(enabled=True, url=proxy))
+
+
 def shared_http_client(settings, endpoint, base_url, rate_settings=None, config=None):
     settings = replace(settings, solver_url=endpoint or settings.solver_url)
     if rate_settings:
@@ -197,7 +210,7 @@ def shared_http_client(settings, endpoint, base_url, rate_settings=None, config=
     auth = AuthSettings.from_config(config or {})
     uses_account = auth.mode not in {"cookie", "disabled"} and auth.username
     if (uses_account or (config or {}).get("cookie")) and len(settings.proxy.addresses) > 1:
-        raise ValueError("x1080x 账号认证请使用一条固定代理线路")
+        settings = _fixed_account_lane(settings)
     return shared_pool("x1080x", settings, base_url,
                        session_factory=_factory(config_json, base_url),
                        identity=hashlib.sha256(config_json.encode()).hexdigest())

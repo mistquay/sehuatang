@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from curl_cffi import requests
-from scrapers.core.config import HttpSettings, RetrySettings
+from scrapers.core.config import HttpSettings, ProxySettings, RetrySettings
 from scrapers.core.contracts import CrawlContext, CrawlTarget, DetailValidationError, SourcePaused
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.models import FetchResult
@@ -281,6 +281,19 @@ class AuthenticationTests(unittest.TestCase):
 
 
 class SharedSessionTests(unittest.TestCase):
+    def test_cookie_pool_pins_first_lane_but_guest_pool_keeps_all_lanes(self):
+        from scrapers.sources.x1080x.http_client import shared_http_client
+        from scrapers.core.pool import stop_shared_clients
+        self.addCleanup(stop_shared_clients)
+        settings = HttpSettings(proxy=ProxySettings(True, urls=("http://proxy.test:17891", "http://proxy.test:17892")))
+        account = shared_http_client(settings, "", "https://example.test", config={
+            "auth": {"mode": "cookie"}, "cookie": "session=private"})
+        self.assertEqual(1, len(account.lanes))
+        self.assertEqual(("http://proxy.test:17891",), account.settings.proxy.addresses)
+        self.assertEqual(2, len(settings.proxy.addresses))
+        guest = shared_http_client(settings, "", "https://example.test", config={"auth": {"mode": "cookie"}})
+        self.assertEqual(2, len(guest.lanes))
+
     def test_browser_host_cookies_are_accepted_by_real_libcurl(self):
         from curl_cffi import Curl, CurlOpt, CurlInfo
         from curl_cffi.requests.cookies import CurlMorsel

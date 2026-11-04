@@ -232,6 +232,23 @@ class IndependentCheckTests(PoolTestCase):
         self.assertEqual(6, len(snapshot["lines"]))
         self.assertTrue(all(row["state"] == "healthy" for row in snapshot["lines"]))
 
+    def test_x1080x_authenticated_pool_pins_one_inherited_lane_without_breaking_monitoring(self):
+        from scrapers.core.network_management import configured_pools
+        from scrapers.x1080x_scraper import X1080XScraper
+        self.config.update(javbee={"enabled": False}, x1080x={"auth": {
+            "mode": "auto", "username": "member", "password": "secret"}})
+        self.fake_sessions(lambda *a, **kw: helpers.response())
+        response = self.client.get("/api/network", headers=self.headers)
+        self.assertEqual(200, response.status_code)
+        pools = configured_pools(self.config)
+        self.assertEqual(2, len(pools["sehuatang"][0].lanes))
+        self.assertEqual(2, len(pools["javbee"][0].lanes))
+        pool = pools["x1080x"][0]
+        self.assertEqual(1, len(pool.lanes))
+        self.assertEqual("http://user:password@proxy.test:17891", pool.lanes[0].settings.proxy.url)
+        self.assertIs(pool, X1080XScraper(failure_store=Mock()).http)
+        self.assertEqual(5, len(response.json()["lines"]))
+
     def test_check_single_line_is_authenticated_and_validates_selector(self):
         self.fake_sessions(lambda *a, **kw: helpers.response())
         self.assertEqual(401, self.client.post("/api/network/check", json={}).status_code)
