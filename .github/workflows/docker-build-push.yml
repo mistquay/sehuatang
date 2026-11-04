@@ -49,6 +49,7 @@ jobs:
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
       image-tags: ${{ steps.meta.outputs.tags }}
+      image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
 
     steps:
       - name: 检出代码
@@ -102,6 +103,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
+            WITH_X1080X_BROWSER=true
             BUILDTIME=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
             VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
             REVISION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}
@@ -110,7 +112,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: 'sarif'
           output: 'trivy-image-results.sarif'
 
@@ -125,40 +127,66 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-and-push]
     if: github.event_name != 'pull_request' && needs.build-and-push.result == 'success'
+    env:
+      TEST_IMAGE: ${{ needs.build-and-push.outputs.image-ref }}
 
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      - name: 测试镜像内浏览器
+        run: |
+          docker run --rm --init --network none --memory 1g --shm-size 256m \
+            "$TEST_IMAGE" python scripts/check_x1080x_browser.py
+
       - name: 测试Docker镜像
         run: |
           # 创建测试配置
           mkdir -p test-config
-          cp config/config.example.yaml test-config/config.yaml
+          # 隔离配置，避免示例 MongoDB SRV 和通知设置触发外部请求。
+          docker run --rm -v "$(pwd)/test-config:/output" "$TEST_IMAGE" python -c '
+          import yaml
+          config = yaml.safe_load(open("/app/config/config.example.yaml", encoding="utf-8"))
+          config["mongodb"].update(enable=False, use_conn_str=False, db_host="127.0.0.1", db_port=27017)
+          config["sendMessage"].update(send_telegram_enable=False, tg_bot_token="123:test")
+          config["crawler"]["retry_failed"]["enabled"] = False
+          for source in config["crawler"]["sources"].values():
+              source["enabled"] = False
+          with open("/output/config.yaml", "w", encoding="utf-8") as output:
+              yaml.safe_dump(config, output, allow_unicode=True, sort_keys=False)
+          '
 
           # 运行健康检查
           docker run --rm \
-            -v $(pwd)/test-config:/app/config \
-            ${{ needs.build-and-push.outputs.image-tags }} \
+            --network none \
+            -v "$(pwd)/test-config:/app/config" \
+            "$TEST_IMAGE" \
             python run.py --mode health
 
       - name: 测试容器启动
         run: |
-          # 测试容器能否正常启动
-          docker run --rm -d \
+          # 启动真实 Web 进程；测试配置已禁用全部采集、数据库和通知。
+          docker run --rm -d --init --network none --memory 1g --shm-size 256m \
             --name test-container \
-            -v $(pwd)/test-config:/app/config \
-            ${{ needs.build-and-push.outputs.image-tags }} \
-            sleep 30
-
-          # 等待容器启动
-          sleep 10
-
-          # 检查容器状态
-          docker ps | grep test-container
-
-          # 清理
-          docker stop test-container || true
+            -e SHT_WEB_TOKEN=ci-smoke \
+            -v "$(pwd)/test-config:/app/config" \
+            "$TEST_IMAGE"
+          trap 'docker logs test-container; docker stop test-container >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 15); do
+            if docker exec test-container python -c '
+          import json, urllib.request
+          request = urllib.request.Request("http://127.0.0.1:8181/api/status", headers={"X-Token": "ci-smoke"})
+          with urllib.request.urlopen(request, timeout=2) as response:
+              status = json.load(response)
+          assert len(status["sources"]) == 3
+          assert not any(source["enabled"] for source in status["sources"])
+          ' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Web 管理接口未在期限内就绪"
+          exit 1
 
   # 通知
   notify:

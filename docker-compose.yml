@@ -6,6 +6,8 @@ services:
     container_name: sehuatang-crawler
     restart: unless-stopped
     stop_grace_period: 45s
+    init: true
+    shm_size: "256mb"
 
     # 环境变量
     environment:
@@ -30,14 +32,14 @@ services:
     networks:
       - crawler_network
 
-    # 资源限制（HTTP 抓取无需大内存）
+    # 同一镜像内包含短时登录用的 Firefox，内存从 1G 起步，按实际负载调整。
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: '0.5'
+          memory: 1G
+          cpus: '1.0'
         reservations:
-          memory: 64M
+          memory: 128M
           cpus: '0.1'
 
     # 日志配置

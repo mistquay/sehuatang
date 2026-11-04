@@ -20,6 +20,11 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
       
+      - name: 设置多架构模拟器
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: 设置Docker Buildx
         uses: docker/setup-buildx-action@v3
       
@@ -46,6 +51,7 @@ jobs:
             org.opencontainers.image.description=高效的论坛数据抓取系统
       
       - name: 构建并推送镜像
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -56,16 +62,39 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            WITH_X1080X_BROWSER=true
+
+      - name: 测试镜像内浏览器
+        if: github.event_name != 'pull_request'
+        env:
+          TEST_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm --init --network none --memory 1g --shm-size 256m \
+            "$TEST_IMAGE" python scripts/check_x1080x_browser.py
       
       - name: 测试镜像
         if: github.event_name != 'pull_request'
+        env:
+          TEST_IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
         run: |
           # 创建测试配置
           mkdir -p test-config
-          cp config/config.example.yaml test-config/config.yaml
+          docker run --rm -v "$(pwd)/test-config:/output" "$TEST_IMAGE" python -c '
+          import yaml
+          config = yaml.safe_load(open("/app/config/config.example.yaml", encoding="utf-8"))
+          config["mongodb"].update(enable=False, use_conn_str=False, db_host="127.0.0.1", db_port=27017)
+          config["sendMessage"].update(send_telegram_enable=False, tg_bot_token="123:test")
+          config["crawler"]["retry_failed"]["enabled"] = False
+          for source in config["crawler"]["sources"].values():
+              source["enabled"] = False
+          with open("/output/config.yaml", "w", encoding="utf-8") as output:
+              yaml.safe_dump(config, output, allow_unicode=True, sort_keys=False)
+          '
           
           # 运行健康检查
           docker run --rm \
-            -v $(pwd)/test-config:/app/config \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            --network none \
+            -v "$(pwd)/test-config:/app/config" \
+            "$TEST_IMAGE" \
             python run.py --mode health

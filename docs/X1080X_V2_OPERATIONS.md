@@ -28,7 +28,7 @@
 
 当时服务器只有八个 BT 分类，`boards` 为空，没有启用示例里的两个独立免费板块。已补上无碼BT、有碼BT，保留原分类、代理和账号；无碼BT 第一页能看到 2026-11-04 的帖子。单页 dry-run 发现 20 个新目标并进入详情处理，随后因 `browser_unavailable` 暂停：当前配置为自动登录，但已部署镜像不含可选浏览器运行时，没有领取或入库。
 
-继续采集可使用 Web 页面里的手动 Cookie 模式，填写完整 Cookie 与同次登录的 User-Agent，保存后重启；或构建启用了 `WITH_X1080X_BROWSER=true` 的镜像。现有官方构建流程没有默认打开该参数，基础镜像不具备自动无头登录能力。未清空旧权限台账，受限记录也没有被错误地计为已入库。
+继续采集可使用 Web 页面里的手动 Cookie 模式，填写完整 Cookie 与同次登录的 User-Agent，保存后重启；或构建启用了 `WITH_X1080X_BROWSER=true` 的镜像。当时的官方构建流程没有打开该参数，因此部署的基础镜像不具备自动无头登录能力。后续已按用户要求更新两套 Actions，当前构建行为见下文；未清空旧权限台账，受限记录也没有被错误地计为已入库。
 
 汇总日志增加 `partitions`、`free_boards`，全部因台账跳过时额外解释这两个计数。本次相关 57 项离线测试通过；这轮现场验证没有完成登录后的免费附件采集，仍需要有效 Cookie 或浏览器运行时。
 
@@ -92,22 +92,39 @@ crawler:
 
 保存后重启加载。不要为了 x1080x 改掉全局四线配置。如果设置了 `CRAWLER_X1080X_PROXY_URLS`，它仍优先于 YAML；可以移除它或改用单个 `CRAWLER_X1080X_PROXY_URL`。
 
-## 可选浏览器运行时
+## GitHub Actions 镜像内置浏览器运行时
 
-只采集公开正文磁链或只导入有效 Cookie 时，可保持基础依赖。启用自动无头登录时，在同一 Python 环境运行：
+`.github/workflows/docker-build-push.yml` 和 `docker-build-simple.yml` 现在均显式传入 `WITH_X1080X_BROWSER=true`。继续使用原镜像及其原有分支/版本标签（例如 `cxsz16888/sehuatang:v2`），浏览器运行时和爬虫包含在同一镜像中。手动 Cookie 与自动登录模式都可以使用它，不需要在已启动容器中再执行 pip 或下载浏览器。
+
+镜像包含固定版本的 invisible-playwright、对应 Firefox 二进制、Xvfb、字体和 GTK/OpenGL 等运行库。基础系统固定为 Python 3.11 / Debian Trixie，使用实际存在的 t64 系统库包名。缓存统一为 `/opt/invisible-playwright`，构建下载和运行登录使用同一路径。
+
+Docker 构建会断网执行 `python scripts/check_x1080x_browser.py`：要求浏览器已存在，启动隐藏显示与 Firefox，打开本地 data 页面并执行 JavaScript。缺少二进制、Xvfb 或动态库时构建失败。发布后 Actions 还会按本次构建的镜像 digest 运行同一检查和隔离健康检查；主工作流会启动真实 Web 进程并验证管理接口。检查不访问站点、不使用账号、不采集资源。
+
+Actions 成功后，在服务器更新 Compose 配置和镜像再重建采集容器：
+
+```bash
+docker compose pull sehuatang-crawler
+docker compose up -d --no-deps sehuatang-crawler
+```
+
+Compose 示例已增加 `init: true`、256 MiB 共享内存，并把采集容器内存上限由 256 MiB 调整为 1 GiB、CPU 上限调整为 1 核。已有部署也需要同步检查资源限制，单纯更新镜像不会替换服务器的 Compose 文件。1 GiB 是登录试运行的起点，仍需按实际负载观察。
+
+## 本地安装与自行构建
+
+不使用镜像、直接运行 Python 时，启用自动无头登录需要在同一环境运行：
 
 ```bash
 python -m pip install -r requirements-auth.txt
 python -m invisible_playwright fetch
 ```
 
-运行时版本已固定到本机验证的 invisible-playwright 0.45.0。浏览器二进制下载是安装步骤，首次在线认证不会代替这一步。Linux 还需要 Firefox 运行库；Dockerfile 的可选构建分支已声明相关包。
+运行时版本已固定到本机验证的 invisible-playwright 0.45.0。浏览器二进制下载是安装步骤，首次在线认证不会代替这一步。Linux 还需要 Xvfb 和 Firefox 运行库，Dockerfile 中已声明相关包。
 
 ```bash
-docker build --build-arg WITH_X1080X_BROWSER=true -t sehuatang:x1080x-browser .
+docker build --build-arg WITH_X1080X_BROWSER=true -t sehuatang:local .
 ```
 
-默认构建参数为 false，基础镜像不包含浏览器，手动 Cookie 模式直接使用基础镜像即可。挂载私有配置后可通过 Web 表单保存设置。若启用无头登录，现有 256 MiB 内存上限不适合浏览器，建议先给至少 1 GiB 再按实测调整；这不是已经完成的生产容量验收。本机没有 Docker，镜像构建及服务器运行仍需部署环境验证。
+Dockerfile 的可选参数默认仍为 false，自行构建时需像上面一样显式传 true；两套 Actions 已固定传 true。挂载私有配置后，通过 Web 表单选择自动登录并保存账号密码即可。本机没有 Docker，本地已完成工作流静态校验和 Windows 浏览器启动检查；Linux 镜像的实际构建和断网冒烟检查须由更新后的 Actions 完成，不能将本地检查视为服务器登录验收。
 
 Byparr 使用 Firefox，DrissionPage 使用 Chromium。本次 DrissionPage 4.1.1.4 的两次无头原型未通过本机 CF，因此未引入生产依赖。当前工作实现已通过 Firefox 登录和 HTTP Cookie 接管，后续若切换驱动，应重新验收完整链路。
 

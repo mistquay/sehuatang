@@ -1,5 +1,5 @@
 # 多阶段构建，减小镜像体积
-FROM python:3.11-slim as builder
+FROM python:3.11-slim-trixie AS builder
 
 ARG BUILDTIME
 ARG VERSION
@@ -20,30 +20,41 @@ RUN if [ "$WITH_X1080X_BROWSER" = "true" ]; then \
     else pip install --no-cache-dir -r requirements.txt; fi
 
 # 运行阶段
-FROM python:3.11-slim
+FROM python:3.11-slim-trixie
 ARG WITH_X1080X_BROWSER=false
 
 # 创建非root用户
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# 运行时依赖：curl_cffi 需要 libcurl 的 ssl 后端
+# 浏览器和后续登录进程使用同一缓存路径，避免构建在 root HOME、运行却找不到二进制。
+ENV INVISIBLE_PLAYWRIGHT_CACHE_DIR=/opt/invisible-playwright
+
+# invisible-playwright 的 headless 在 Linux 通过 Xvfb 运行完整 Firefox。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && if [ "$WITH_X1080X_BROWSER" = "true" ]; then apt-get install -y --no-install-recommends \
-      libgtk-3-0 libdbus-glib-1-2 libasound2 libx11-xcb1 libxt6 libxrender1 \
-      libxrandr2 libxcomposite1 libxcursor1 libxdamage1 libxi6 libnss3 libgbm1; fi \
+      xvfb xauth fonts-liberation fonts-noto-cjk \
+      libgtk-3-0t64 libdbus-glib-1-2 libasound2t64 libx11-xcb1 libxt6t64 libxtst6 libxrender1 \
+      libxrandr2 libxcomposite1 libxcursor1 libxdamage1 libxfixes3 libxi6 \
+      libnss3 libgbm1 libgl1 libglx-mesa0 libegl1 libpci3; fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-RUN if [ "$WITH_X1080X_BROWSER" = "true" ]; then python -m invisible_playwright fetch; fi
+RUN mkdir -p "$INVISIBLE_PLAYWRIGHT_CACHE_DIR" \
+    && if [ "$WITH_X1080X_BROWSER" = "true" ]; then python -m invisible_playwright fetch; fi \
+    && chown -R appuser:appuser "$INVISIBLE_PLAYWRIGHT_CACHE_DIR"
 
 COPY --chown=appuser:appuser . .
 
 RUN mkdir -p /app/logs /app/config \
     && chown -R appuser:appuser /app
+
+# 只使用镜像内的二进制；禁止靠联网补下载或访问业务网站来通过检查。
+RUN --network=none if [ "$WITH_X1080X_BROWSER" = "true" ]; then \
+      python scripts/check_x1080x_browser.py; fi
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
