@@ -11,6 +11,8 @@ build/
 # 管理页前端不受 *.html 规则影响
 !web/index.html
 config.yaml
+config.yaml.bak
+config.yaml.tmp
 util/renamefile.py
 cfproxy.py
 test/

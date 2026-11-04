@@ -129,14 +129,14 @@ idempotency_key
 
 用户确认只采集免费资源，并要求优先沿用服务器上已有的 Byparr，而不是默认采用人工导入 Cookie 的新流程。推荐采用“Byparr 处理 CF + 来源认证逻辑 + 同线路 HTTP 共享登录会话”的方式；认证初始化是否需要额外浏览器支持，须实测后决定：
 
-1. 凭据由环境变量或本机私有配置提供；禁止写入提交、示例配置、调试 HTML 或日志。
+1. 凭据优先由 Web 专用表单写入本机私有配置；环境变量兼容已有部署。手动 Cookie 模式不处理账号登录；禁止将凭据写入提交、示例配置、调试 HTML 或日志。
 2. 优先复用现有 Byparr 服务处理 CF；提供明确的账号登录初始化/续期入口，不能把获得 `cf_clearance` 等同于账号登录成功。
 3. 列表、详情、预览与领取尽量走 HTTP；本次共享 Cookie 的 APIRequestContext 已验证可以读取分类 SSR 列表。
 4. 实现阶段再验证现有 `curl_cffi` 对 Cookie/UA 的复用效果；APIRequestContext 成功不等于已经验证 `curl_cffi` 和生产代理池。
 5. 一个账号先使用一条固定线路和低并发。会话、CSRF 和 CF 通行状态按线路维护；不直接把一组 Cookie 分发到不同出口。
 6. 失效后停止本轮、提示重新登录或续期；不让每个详情 worker 同时发起登录，也不反复提交账号密码。
 
-实现采用独立认证模块：有效 Cookie 优先，Turnstile 关闭时尝试 HTTP 登录，否则使用可选的 invisible-playwright Firefox 无头运行时。现有 Byparr `/v1` 仍只负责 CF 与游客页面渲染。账号无头登录已在本机通过；这不等于用户服务器已部署并验收。
+实现采用独立认证模块，默认 `cookie` 模式只使用手动提供的会话，失效后暂停；Web 页面也可显式选择 `auto`，届时有效 Cookie 优先，Turnstile 关闭时尝试 HTTP 登录，否则使用可选的 invisible-playwright Firefox 无头运行时。现有 Byparr `/v1` 仍只负责 CF 与游客页面渲染。账号无头登录已在本机通过；这不等于用户服务器已部署并验收。
 
 ### DrissionPage 评估与 Cookie 接管实测
 
@@ -244,5 +244,6 @@ title / date / post_time / url / code / magnet / magnets / img
 - [x] 运行受影响模块离线回归；字幕搜索 API 类型检查及两组相关测试通过。
 - [x] 本机小范围现场验证共享登录与免费 torrent 链路，无数据库和 Telegram 操作。
 - [ ] 在目标服务器构建可选浏览器镜像，确认代理与 Byparr 同一出口后验收；本次不部署、不推送。
+- [x] Web 专用表单配置账号或手动 Cookie，验证手动模式不登录、秘密字段保留/清空与页面交互；全部 380 项离线测试完成，5 项跳过，其余通过。
 
 现有未提交的 README、脚本及相关测试改动与本调查无关，保持原样。调查浏览器截图/快照不作为代码或测试夹具提交；正文不记录密码、Cookie 值、CSRF 值或临时下载标识。

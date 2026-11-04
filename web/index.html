@@ -551,6 +551,42 @@
         font-family: var(--mono);
         color: var(--ink);
       }
+      .auth-config {
+        margin-bottom: 26px;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #f7f8f4;
+      }
+      .auth-config fieldset {
+        padding: 0;
+        margin: 0;
+        border: 0;
+        min-width: 0;
+      }
+      .auth-config .hint {
+        color: #56635b;
+      }
+      .auth-config input,
+      .auth-config select,
+      .auth-config button {
+        min-height: 44px;
+      }
+      .auth-config .check input {
+        min-height: auto;
+      }
+      .auth-config .field-pair > * {
+        min-width: 0;
+      }
+      .auth-config .hint,
+      .auth-config .check {
+        overflow-wrap: anywhere;
+      }
+      .config-advanced summary {
+        cursor: pointer;
+        margin-bottom: 18px;
+        font-weight: 600;
+      }
       .requeue {
         min-height: 30px;
         font-size: 11px;
@@ -791,6 +827,13 @@
         }
         .backfill-layout {
           grid-template-columns: 1fr;
+        }
+        .auth-config .field-pair {
+          grid-template-columns: 1fr;
+          gap: 0;
+        }
+        .auth-config {
+          padding: 16px;
         }
         .next-time {
           font-size: 28px;
@@ -1212,6 +1255,66 @@
           aria-labelledby="tab-config"
           hidden
         >
+          <form id="x1080xConfigForm" class="auth-config" autocomplete="off">
+            <div class="toolbar">
+              <div>
+                <h2>x1080x 登录与 Cookie</h2>
+                <p class="hint">手动 Cookie 模式下，程序只采集免费资源，失效后暂停等待更新。</p>
+              </div>
+              <div class="filters">
+                <button type="button" id="reloadX1080xConfig">重新加载</button>
+                <button type="submit" class="primary" id="saveX1080xConfig" disabled>保存 x1080x 配置</button>
+              </div>
+            </div>
+            <fieldset id="x1080xConfigFields" disabled>
+              <label class="field" for="x1080xAuthMode">认证方式
+                <select id="x1080xAuthMode" aria-describedby="x1080xModeHint">
+                  <option value="cookie">手动 Cookie（推荐，不自动登录）</option>
+                  <option value="auto">账号自动登录（需要时使用无头浏览器）</option>
+                  <option value="http">账号登录（仅 HTTP）</option>
+                  <option value="browser">账号登录（无头浏览器）</option>
+                  <option value="disabled">关闭主动登录（兼容旧配置）</option>
+                </select>
+              </label>
+              <p class="hint" id="x1080xModeHint">手动登录网站后提供完整 Cookie，无需填写账号密码或安装浏览器运行时。</p>
+              <div id="x1080xAccountFields" hidden>
+                <div class="field-pair">
+                  <label class="field" for="x1080xUsername">账号
+                    <input id="x1080xUsername" autocomplete="username" />
+                  </label>
+                  <label class="field" for="x1080xPassword">密码
+                    <input id="x1080xPassword" type="password" autocomplete="new-password" aria-describedby="x1080xPasswordHint" />
+                  </label>
+                </div>
+                <p class="hint" id="x1080xPasswordHint">留空保留已保存的密码。</p>
+                <label class="check"><input type="checkbox" id="x1080xClearPassword" />清空已保存的密码</label>
+              </div>
+              <label class="field" for="x1080xCookie">Cookie
+                <input id="x1080xCookie" type="password" autocomplete="off" spellcheck="false" aria-describedby="x1080xCookieHint" placeholder="粘贴已登录请求中的完整 Cookie 内容；留空保留" />
+              </label>
+              <p class="hint" id="x1080xCookieHint">复制浏览器开发者工具 → 网络中已登录请求的 Cookie 请求头，包含账号会话、浏览器会话、CSRF 和 CF Cookie。不要只复制 document.cookie，它可能缺少 HttpOnly 会话。</p>
+              <div class="filters">
+                <label class="check"><input type="checkbox" id="x1080xShowCookie" />显示本次输入的 Cookie</label>
+                <label class="check"><input type="checkbox" id="x1080xClearCookie" />清空已保存的 Cookie</label>
+              </div>
+              <div class="field-pair">
+                <label class="field" for="x1080xUserAgent">登录浏览器 User-Agent
+                  <input id="x1080xUserAgent" required spellcheck="false" aria-describedby="x1080xBrowserHint" />
+                </label>
+                <label class="field" for="x1080xBrowser">HTTP 浏览器类型
+                  <select id="x1080xBrowser">
+                    <option value="firefox147">Firefox（配合当前 Byparr）</option>
+                    <option value="chrome">Chrome / Edge</option>
+                  </select>
+                </label>
+              </div>
+              <p class="hint" id="x1080xBrowserHint">Cookie 和 User-Agent 取自同一次登录，采集使用相同网络出口；按实际登录浏览器选择类型。</p>
+            </fieldset>
+            <p class="hint" id="x1080xConfigHint" role="status" aria-live="polite">正在读取 x1080x 配置…</p>
+            <p class="hint" id="x1080xEnvironmentHint" hidden></p>
+          </form>
+          <details class="config-advanced" id="advancedConfig">
+            <summary>高级：编辑完整 YAML 配置</summary>
           <div class="toolbar">
             <div>
               <h2>配置文件</h2>
@@ -1231,6 +1334,7 @@
             <span id="configHint">保存前检查 YAML 语法；保存后重启服务生效</span
             ><span>UTF-8</span>
           </div>
+          </details>
         </section>
       </div>
       <footer>
@@ -1256,6 +1360,9 @@
       let activeTab = "runs",
         configLoaded = false,
         configDirty = false,
+        x1080xConfigLoaded = false,
+        x1080xConfigDirty = false,
+        configBusy = false,
         offset = 0,
         lastStatus = null,
         toastTimer,
@@ -1626,6 +1733,52 @@
         configDirty = false;
         $("configHint").textContent = "保存后重启服务生效";
       }
+      function updateX1080xMode() {
+        const mode = $("x1080xAuthMode").value;
+        $("x1080xAccountFields").hidden = ["cookie", "disabled"].includes(mode);
+        $("x1080xModeHint").textContent = ["cookie", "disabled"].includes(mode)
+          ? "仅使用已有 Cookie；失效后暂停，不提交账号密码，不启动登录浏览器。"
+          : "优先复用有效 Cookie；失效后按所选方式登录。无头登录需要安装可选浏览器运行时。";
+      }
+      async function loadX1080xConfig() {
+        if (x1080xConfigDirty && !confirm("重新加载会覆盖尚未保存的 x1080x 设置，是否继续？")) return;
+        const data = await api("/api/config/x1080x");
+        $("x1080xAuthMode").value = data.mode;
+        $("x1080xUsername").value = data.username;
+        $("x1080xPassword").value = "";
+        $("x1080xCookie").value = "";
+        $("x1080xCookie").type = "password";
+        $("x1080xShowCookie").checked = false;
+        for (const name of ["Password", "Cookie"]) {
+          $("x1080xClear" + name).checked = false;
+          $("x1080x" + name).disabled = false;
+        }
+        $("x1080xPasswordHint").textContent = data.password_set ? "已保存密码；留空保留，勾选下方选项可清空。" : "尚未保存密码；自动登录模式需要填写。";
+        $("x1080xCookie").placeholder = data.cookie_set ? "已保存 Cookie；留空保留，粘贴新值替换" : "粘贴已登录请求中的完整 Cookie 内容";
+        $("x1080xUserAgent").value = data.user_agent;
+        const browser = $("x1080xBrowser");
+        if (![...browser.options].some(option => option.value === data.impersonate))
+          browser.add(new Option(`当前配置：${data.impersonate}`, data.impersonate));
+        browser.value = data.impersonate;
+        const names = { username: "账号", password: "密码", cookie: "Cookie" },
+          overrides = data.environment_overrides || [];
+        $("x1080xEnvironmentHint").hidden = !overrides.length;
+        $("x1080xEnvironmentHint").textContent = "检测到环境变量覆盖：" + overrides.map(name => names[name]).join("、") + "。页面保存后，这些字段仍优先使用环境变量；请在部署配置中移除对应变量。";
+        $("x1080xConfigHint").textContent = (data.cookie_set ? "已保存 Cookie。" : "尚未保存 Cookie。") + "密码和 Cookie 留空保留；保存后重启服务生效。";
+        $("x1080xConfigFields").disabled = configBusy;
+        $("saveX1080xConfig").disabled = configBusy;
+        x1080xConfigLoaded = true;
+        x1080xConfigDirty = false;
+        updateX1080xMode();
+      }
+      function configSaving(busy) {
+        configBusy = busy;
+        $("x1080xConfigFields").disabled = busy || !x1080xConfigLoaded;
+        $("configText").disabled = busy;
+        $("saveX1080xConfig").disabled = busy || !x1080xConfigLoaded;
+        for (const id of ["saveConfig", "reloadConfig", "reloadX1080xConfig"])
+          $(id).disabled = busy;
+      }
       async function refreshPanel() {
         if (activeTab === "runs") await refreshRuns();
         else if (activeTab === "failures") await refreshFailures();
@@ -1633,7 +1786,10 @@
         else if (activeTab === "backfill") await refreshBackfill();
         else if (activeTab === "logs") await refreshLogs();
         else if (activeTab === "network") await refreshNetwork();
-        else if (!configLoaded) await loadConfig();
+        else {
+          if (!x1080xConfigLoaded) await loadX1080xConfig();
+          if ($("advancedConfig").open && !configLoaded) await loadConfig();
+        }
       }
       async function switchTab(name) {
         activeTab = name;
@@ -1744,17 +1900,66 @@
         }
       };
       $("saveConfig").onclick = async () => {
+        if (x1080xConfigDirty) return toast("请先保存或重新加载上方 x1080x 设置，再保存 YAML。", true);
+        configSaving(true);
         try {
           await api("/api/config", {
             method: "PUT",
             body: JSON.stringify({ content: $("configText").value }),
           });
           configDirty = false;
+          x1080xConfigLoaded = false;
+          await loadX1080xConfig();
           $("configHint").textContent = "配置已保存，重启服务后生效";
           toast("配置已保存");
         } catch (e) {
           toast(e.message, true);
+        } finally {
+          configSaving(false);
         }
+      };
+      $("x1080xConfigForm").onsubmit = async event => {
+        event.preventDefault();
+        if (configDirty) return toast("请先保存或重新加载下方 YAML 编辑，再保存 x1080x 设置。", true);
+        const payload = {
+          mode: $("x1080xAuthMode").value,
+          username: $("x1080xUsername").value,
+          user_agent: $("x1080xUserAgent").value,
+          impersonate: $("x1080xBrowser").value,
+        };
+        for (const name of ["Password", "Cookie"])
+          if ($("x1080xClear" + name).checked || $("x1080x" + name).value)
+            payload[name.toLowerCase()] = $("x1080xClear" + name).checked ? "" : $("x1080x" + name).value;
+        configSaving(true);
+        $("x1080xConfigHint").textContent = "正在保存…";
+        try {
+          await api("/api/config/x1080x", { method: "PUT", body: JSON.stringify(payload) });
+          x1080xConfigDirty = false;
+          configLoaded = false;
+          $("configText").value = "";
+          await loadX1080xConfig();
+          if ($("advancedConfig").open) await loadConfig();
+          $("x1080xConfigHint").textContent = "x1080x 配置已保存，重启服务后生效。";
+          toast("x1080x 配置已保存");
+        } catch (e) {
+          $("x1080xConfigHint").textContent = "保存失败：" + e.message;
+          toast(e.message, true);
+        } finally {
+          configSaving(false);
+        }
+      };
+      $("x1080xConfigForm").oninput = event => {
+        if (event.target.id === "x1080xShowCookie") return;
+        x1080xConfigDirty = true;
+        $("x1080xConfigHint").textContent = "x1080x 有尚未保存的修改。";
+      };
+      $("x1080xAuthMode").onchange = updateX1080xMode;
+      $("x1080xShowCookie").onchange = () => { $("x1080xCookie").type = $("x1080xShowCookie").checked ? "text" : "password"; };
+      for (const name of ["Password", "Cookie"])
+        $("x1080xClear" + name).onchange = () => { $("x1080x" + name).disabled = $("x1080xClear" + name).checked; };
+      $("reloadX1080xConfig").onclick = () => loadX1080xConfig().catch(report);
+      $("advancedConfig").ontoggle = () => {
+        if ($("advancedConfig").open && !configLoaded) loadConfig().catch(report);
       };
       $("configText").oninput = () => {
         configDirty = true;
@@ -1800,7 +2005,7 @@
         switchTab(tabs[next].dataset.tab);
       });
       window.addEventListener("beforeunload", (event) => {
-        if (configDirty) {
+        if (configDirty || x1080xConfigDirty) {
           event.preventDefault();
           event.returnValue = "";
         }

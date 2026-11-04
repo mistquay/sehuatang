@@ -195,7 +195,8 @@ def shared_http_client(settings, endpoint, base_url, rate_settings=None, config=
                            max_cooldown_seconds=rate_settings.max_cooldown_seconds)
     config_json = json.dumps(config or {}, sort_keys=True, ensure_ascii=False)
     auth = AuthSettings.from_config(config or {})
-    if (auth.username or (config or {}).get("cookie")) and len(settings.proxy.addresses) > 1:
+    uses_account = auth.mode not in {"cookie", "disabled"} and auth.username
+    if (uses_account or (config or {}).get("cookie")) and len(settings.proxy.addresses) > 1:
         raise ValueError("x1080x 账号认证请使用一条固定代理线路")
     return shared_pool("x1080x", settings, base_url,
                        session_factory=_factory(config_json, base_url),

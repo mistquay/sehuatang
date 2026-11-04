@@ -125,6 +125,7 @@ def create_app(
         ).strip()
     )
     resolved_config_path = Path(config_path or _config_manager._config_path)
+    config_lock = threading.Lock()
 
     def require_auth(request: Request):
         if resolved_token:
@@ -408,18 +409,7 @@ def create_app(
             raise HTTPException(status_code=500, detail=f"读取配置失败: {exc}")
         return {"path": str(resolved_config_path), "content": content}
 
-    @app.put("/api/config", dependencies=[Depends(require_auth)])
-    def write_config_file(payload: dict):
-        content = payload.get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise HTTPException(status_code=400, detail="配置内容不能为空")
-        try:
-            parsed = yaml.safe_load(content)
-        except yaml.YAMLError as exc:
-            raise HTTPException(status_code=400, detail=f"YAML 语法错误: {exc}")
-        if not isinstance(parsed, dict):
-            raise HTTPException(status_code=400, detail="配置必须是 YAML 映射")
-
+    def save_config_content(content):
         try:
             if resolved_config_path.exists():
                 backup_path = resolved_config_path.with_suffix(".yaml.bak")
@@ -435,6 +425,49 @@ def create_app(
 
         log.info("管理页更新了配置文件（重启后生效）")
         return {"ok": True, "restart_required": True}
+
+    @app.put("/api/config", dependencies=[Depends(require_auth)])
+    def write_config_file(payload: dict):
+        content = payload.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise HTTPException(status_code=400, detail="配置内容不能为空")
+        try:
+            parsed = yaml.safe_load(content)
+        except yaml.YAMLError as exc:
+            raise HTTPException(status_code=400, detail=f"YAML 语法错误: {exc}")
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="配置必须是 YAML 映射")
+        with config_lock:
+            return save_config_content(content)
+
+    def load_config_mapping():
+        try:
+            parsed = yaml.safe_load(resolved_config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            raise HTTPException(status_code=400, detail="无法读取配置，请先检查配置文件") from None
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=400, detail="配置必须是 YAML 映射")
+        return parsed
+
+    @app.get("/api/config/x1080x", dependencies=[Depends(require_auth)])
+    def read_x1080x_config():
+        from .x1080x_config import form_state
+        try:
+            return form_state(load_config_mapping())
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(status_code=400, detail="x1080x 配置结构无效，请检查 YAML 配置") from None
+
+    @app.put("/api/config/x1080x", dependencies=[Depends(require_auth)])
+    def write_x1080x_config(payload: dict):
+        from .x1080x_config import update_form
+        with config_lock:
+            try:
+                parsed = update_form(load_config_mapping(), payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            except (TypeError, AttributeError):
+                raise HTTPException(status_code=400, detail="x1080x 配置结构无效，请检查 YAML 配置") from None
+            return save_config_content(yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False))
 
     # ---------- 重启 ----------
 

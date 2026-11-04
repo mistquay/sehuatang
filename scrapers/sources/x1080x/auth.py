@@ -1,4 +1,4 @@
-"""账号认证独立于资源解析；HTTP 优先，验证需要浏览器时才启动无头 Firefox。"""
+"""默认只使用手动 Cookie；显式启用账号模式时才执行独立登录。"""
 import asyncio
 import os
 import time
@@ -13,16 +13,16 @@ from scrapers.core.contracts import SourcePaused
 class AuthSettings:
     username: str = ""
     password: str = field(default="", repr=False)
-    mode: str = "auto"
+    mode: str = "cookie"
     timeout: float = 120
     headless: bool = True
 
     @classmethod
     def from_config(cls, config):
         raw = config.get("auth") or {}
-        mode = str(raw.get("mode", "auto"))
-        if mode not in {"auto", "http", "browser", "disabled"}:
-            raise ValueError("x1080x.auth.mode 只支持 auto/http/browser/disabled")
+        mode = str(raw.get("mode", "cookie"))
+        if mode not in {"cookie", "auto", "http", "browser", "disabled"}:
+            raise ValueError("x1080x.auth.mode 只支持 cookie/auto/http/browser/disabled")
         timeout = float(raw.get("timeout", 120))
         if not 0 < timeout <= 600:
             raise ValueError("x1080x.auth.timeout 必须在 0 到 600 秒之间")
@@ -40,7 +40,7 @@ class Authenticator:
         try:
             authenticated = client.is_authenticated(resource_id)
         except SourcePaused as exc:
-            if exc.reason == "rate_limited":
+            if exc.reason == "rate_limited" or self.settings.mode in {"cookie", "disabled"}:
                 raise
             authenticated = False
         if authenticated:
@@ -48,8 +48,10 @@ class Authenticator:
             return
         client.authenticated = False
         cfg = self.settings
+        if cfg.mode == "cookie":
+            raise SourcePaused("cookie_expired", "x1080x Cookie 缺失或已失效，请在管理页更新 Cookie；本轮暂停")
         if cfg.mode == "disabled" or not cfg.username or not cfg.password:
-            raise SourcePaused("login_required", "x1080x 资源需要登录，请配置账号认证；本轮暂停")
+            raise SourcePaused("login_required", "x1080x 资源需要登录，请在管理页配置账号或手动 Cookie；本轮暂停")
         if cfg.mode in {"auto", "http"}:
             try:
                 if self._http_login(client, resource_id):

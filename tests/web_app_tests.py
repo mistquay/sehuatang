@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
 from fastapi.testclient import TestClient
 
 from scrapers.registry import source_registry
@@ -135,6 +136,80 @@ class ConfigEndpointTests(unittest.TestCase):
         )
         backup = self.config_path.with_suffix(".yaml.bak")
         self.assertIn("enable: false", backup.read_text(encoding="utf-8"))
+
+    def test_x1080x_form_requires_authentication(self):
+        self.assertEqual(401, self.client.get("/api/config/x1080x").status_code)
+        self.assertEqual(401, self.client.put("/api/config/x1080x", json={"mode": "cookie"}).status_code)
+
+    def seed_x1080x(self):
+        config = {"mongodb": {"enable": False}, "custom": {"keep": [1, 2]}, "x1080x": {
+            "categories": {"a": "中文字幕"}, "cookie": "session=private-cookie", "http": {"user_agent": "Original-login-browser"},
+            "auth": {"mode": "auto", "username": "member", "password": "private-password", "timeout": 90}},
+            "crawler": {"sources": {"x1080x": {"concurrency": 1, "http": {"impersonate": "firefox147"}}}}}
+        self.config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+        return config
+
+    def test_x1080x_read_does_not_return_saved_password_or_cookie(self):
+        self.seed_x1080x()
+        response = self.client.get("/api/config/x1080x", headers=self.headers)
+        data = response.json()
+        self.assertEqual("member", data["username"])
+        self.assertTrue(data["password_set"])
+        self.assertTrue(data["cookie_set"])
+        self.assertEqual("Original-login-browser", data["user_agent"])
+        self.assertNotIn("private-password", response.text)
+        self.assertNotIn("private-cookie", response.text)
+        self.assertNotIn("password", data)
+        self.assertNotIn("cookie", data)
+
+    def test_x1080x_form_saves_and_preserves_unsubmitted_secrets_and_other_settings(self):
+        original = self.seed_x1080x()
+        response = self.client.put("/api/config/x1080x", headers=self.headers, json={
+            "mode": "cookie", "user_agent": "Firefox test", "impersonate": "firefox147"})
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.json()["restart_required"])
+        saved = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(original["custom"], saved["custom"])
+        self.assertEqual(original["x1080x"]["cookie"], saved["x1080x"]["cookie"])
+        self.assertEqual(original["x1080x"]["auth"]["password"], saved["x1080x"]["auth"]["password"])
+        self.assertEqual(90, saved["x1080x"]["auth"]["timeout"])
+        self.assertEqual("cookie", saved["x1080x"]["auth"]["mode"])
+        self.assertEqual("Firefox test", saved["crawler"]["sources"]["x1080x"]["http"]["user_agent"])
+        self.assertEqual(original, yaml.safe_load(self.config_path.with_suffix(".yaml.bak").read_text(encoding="utf-8")))
+
+    def test_x1080x_clear_removes_override_values_without_changing_proxy_or_categories(self):
+        config = self.seed_x1080x()
+        config["crawler"]["sources"]["x1080x"].update(auth={"password": "override", "headless": False}, cookie="session=override")
+        self.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        response = self.client.put("/api/config/x1080x", headers=self.headers,
+                                   json={"cookie": "", "password": "", "mode": "cookie"})
+        self.assertEqual(200, response.status_code)
+        saved = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual("", saved["x1080x"]["cookie"])
+        self.assertEqual("", saved["x1080x"]["auth"]["password"])
+        self.assertFalse(saved["x1080x"]["auth"]["headless"])
+        self.assertNotIn("auth", saved["crawler"]["sources"]["x1080x"])
+        self.assertNotIn("cookie", saved["crawler"]["sources"]["x1080x"])
+        self.assertEqual(config["x1080x"]["categories"], saved["x1080x"]["categories"])
+
+    def test_x1080x_invalid_form_never_overwrites_file(self):
+        self.seed_x1080x()
+        original = self.config_path.read_bytes()
+        for payload in ({"mode": "invalid"}, {"password": None}, {"impersonate": "invalid"},
+                        {"cookie": "not-a-cookie"}, {"cookie": "a=b\r\nX-Other: secret"},
+                        {"user_agent": ""}, {"unexpected": "value"}):
+            with self.subTest(payload=payload):
+                response = self.client.put("/api/config/x1080x", headers=self.headers, json=payload)
+                self.assertEqual(400, response.status_code)
+                self.assertEqual(original, self.config_path.read_bytes())
+
+    def test_x1080x_reports_environment_override_names_without_values(self):
+        with mock.patch.dict("os.environ", {"CRAWLER_X1080X_PASSWORD": "env-private", "CRAWLER_X1080X_COOKIE": "env-private-cookie"}):
+            response = self.client.get("/api/config/x1080x", headers=self.headers)
+        self.assertEqual("cookie", response.json()["mode"])
+        self.assertIn("cookie", response.json()["environment_overrides"])
+        self.assertIn("password", response.json()["environment_overrides"])
+        self.assertNotIn("env-private", response.text)
 
 
 class ActionTests(unittest.TestCase):

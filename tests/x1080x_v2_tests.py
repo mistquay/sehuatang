@@ -193,7 +193,7 @@ class AuthenticationTests(unittest.TestCase):
     def test_http_without_turnstile_avoids_browser(self):
         client = self.client(False)
         browser = Mock()
-        Authenticator(AuthSettings("name", "secret"), browser).ensure(client, RID)
+        Authenticator(AuthSettings("name", "secret", mode="auto"), browser).ensure(client, RID)
         browser.assert_not_called()
         self.assertTrue(client.authenticated)
         self.assertEqual("/api/auth/login", client.api_json.call_args.args[1])
@@ -201,7 +201,7 @@ class AuthenticationTests(unittest.TestCase):
     def test_turnstile_uses_independent_browser_and_validates_imported_session(self):
         client = self.client()
         browser = Mock(return_value=([{"name": "session", "value": "secret"}], "Firefox"))
-        auth = Authenticator(AuthSettings("name", "secret"), browser)
+        auth = Authenticator(AuthSettings("name", "secret", mode="auto"), browser)
         auth.ensure(client, RID)
         self.assertEqual(1, client.api_json.call_count)
         browser.assert_called_once()
@@ -222,9 +222,41 @@ class AuthenticationTests(unittest.TestCase):
         client.is_authenticated.side_effect = [False, False]
         browser = Mock(return_value=([{"name": "session", "value": "secret"}], "Firefox"))
         with self.assertRaises(SourcePaused) as caught:
-            Authenticator(AuthSettings("name", "secret"), browser).ensure(client, RID)
+            Authenticator(AuthSettings("name", "secret", mode="auto"), browser).ensure(client, RID)
         self.assertEqual("authentication_failed", caught.exception.reason)
         self.assertFalse(client.authenticated)
+
+    def test_cookie_mode_never_logs_in_even_when_credentials_are_present(self):
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                client = Mock()
+                client.is_authenticated.return_value = valid
+                browser = Mock()
+                auth = Authenticator(AuthSettings("name", "secret", mode="cookie"), browser)
+                if valid:
+                    auth.ensure(client, RID)
+                    self.assertTrue(client.authenticated)
+                else:
+                    with self.assertRaises(SourcePaused) as caught:
+                        auth.ensure(client, RID)
+                    self.assertEqual("cookie_expired", caught.exception.reason)
+                browser.assert_not_called()
+                client.api_json.assert_not_called()
+                client.install_browser_session.assert_not_called()
+        client = Mock()
+        client.is_authenticated.side_effect = SourcePaused("session_unavailable", "network unavailable")
+        browser = Mock()
+        with self.assertRaises(SourcePaused) as caught:
+            Authenticator(AuthSettings(mode="cookie"), browser).ensure(client, RID)
+        self.assertEqual("session_unavailable", caught.exception.reason)
+        browser.assert_not_called()
+        client.api_json.assert_not_called()
+
+    def test_missing_mode_defaults_to_cookie_without_using_environment_credentials(self):
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"CRAWLER_X1080X_USERNAME": "name", "CRAWLER_X1080X_PASSWORD": "secret"}):
+            settings = AuthSettings.from_config({})
+        self.assertEqual("cookie", settings.mode)
 
     def test_login_failure_does_not_create_resource_failure_ledger(self):
         source = X1080XSource({"categories": {CAT: "中文字幕"}}, diagnostics=False)

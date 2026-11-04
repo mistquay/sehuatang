@@ -52,13 +52,14 @@ x1080x:
     "3zfPdYrZvRsB5MYMHwE70K": "亚洲无码"
     "5PDZcHM9127Cbn21wUhl1q": "亚洲有码"
   auth:
-    mode: "auto" # HTTP 无法完成认证时使用独立无头浏览器；还支持 http/browser/disabled
-    # 推荐通过 CRAWLER_X1080X_USERNAME / CRAWLER_X1080X_PASSWORD 注入
+    mode: "cookie" # 默认仅使用手动 Cookie，不提交账号；auto 为自动登录，还支持 http/browser/disabled
+    # 推荐通过 Web 配置页填写；环境变量覆盖仍保留，供已有部署兼容。
     username: ""
     password: ""
     headless: true
     timeout: 120
-  # 可选 Cookie 导入（CRAWLER_X1080X_COOKIE）；已有有效登录会话时不重复登录。
+  # Web 配置页可填写完整 Cookie，并同步登录浏览器 User-Agent / 浏览器类型。
+  # cookie 模式失效后暂停，等待手动更新；不需要安装无头浏览器。
   cookie: ""
 
 # 多来源爬虫公共配置。来源配置覆盖 defaults。
