@@ -1858,8 +1858,9 @@
           .value.split(/[,，]/)
           .map((x) => x.trim())
           .filter(Boolean);
-        if (partitions.some((p) => !/^\d+$/.test(p))) {
-          toast("分区 ID 必须为数字，以逗号分隔", true);
+        const validPartition = source === "x1080x" ? /^(?:[0-9A-Za-z]{22}|\d+)$/ : /^\d+$/;
+        if (partitions.some((p) => !validPartition.test(p))) {
+          toast(source === "x1080x" ? "请填写 22 位分类/板块 ID，以逗号分隔；也兼容旧数字分类别名" : "版块 ID 必须为数字，以逗号分隔", true);
           return;
         }
         const payload = {
@@ -1871,7 +1872,7 @@
         };
         if (partitions.length)
           payload[source === "sehuatang" ? "fids" : "typeids"] =
-            partitions.map(Number);
+            source === "x1080x" ? partitions : partitions.map(Number);
         act(
           event.submitter,
           "/api/actions/backfill-pages",

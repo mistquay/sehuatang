@@ -32,6 +32,10 @@ class ListValidationError(ValueError):
     pass
 
 
+class SiteEntryPage(ListValidationError):
+    """欢迎/入口页不能解释为资源列表或末页。"""
+
+
 @dataclass(frozen=True)
 class ListPage:
     tids: List[int | str]
@@ -56,6 +60,12 @@ class X1080XParser:
 
     def __init__(self, type_map: Optional[Dict[str, str]] = None):
         self.type_map = dict(type_map or {})
+
+    @staticmethod
+    def is_entry_page(soup):
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        return any(word in title for word in ("歡迎訪問", "欢迎访问")) and soup.select_one(
+            ".thread-list, #threadlist, #first-post") is None
 
     def is_unavailable(self, soup: BeautifulSoup, text: str) -> bool:
         title = (soup.title.get_text(strip=True) if soup.title else "").lower()
@@ -100,6 +110,8 @@ class X1080XParser:
         if is_cf_blocked(html_content) or is_cf_challenge(html_content, 200) or is_rate_limited(html_content):
             raise ListValidationError("列表响应为验证或受限页面")
         soup = BeautifulSoup(html_content, "html.parser")
+        if self.is_entry_page(soup):
+            raise SiteEntryPage("返回站点欢迎入口页，请检查当前域名或入口验证")
         if soup.select_one(".thread-list"):
             return self._parse_resource_list(soup, html_content, expected_page)
         scope = soup.select_one("#threadlist")
@@ -169,6 +181,8 @@ class X1080XParser:
     def parse_resource(self, html_content, detail_url, *, resource_id, board_id="",
                        category_id="", section=""):
         soup = BeautifulSoup(html_content, "html.parser")
+        if self.is_entry_page(soup):
+            raise DetailValidationError("site_entry_required")
         # 已保存的旧 HTML 仍可离线解析，采集 URL 不再使用 Discuz。
         if soup.select_one("#thread_subject, #nav"):
             return self.parse_detail(html_content, detail_url, tid=resource_id,

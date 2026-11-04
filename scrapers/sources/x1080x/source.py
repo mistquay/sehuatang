@@ -15,11 +15,11 @@ from scrapers.core.contracts import (
     SourcePaused,
 )
 from scrapers.core.cf_challenge import is_rate_limited
-from scrapers.core.http import CrawlerHttpClient
+from scrapers.core.http import CrawlerHttpClient, redact_url
 from scrapers.core.models import FetchResult
 from util.log_util import log
 
-from .parser import X1080XParser, ListValidationError
+from .parser import X1080XParser, ListValidationError, SiteEntryPage
 from .attachments import collect_free_torrents
 from util.javbee_code import normalize_code_key, resolve_x1080x_code
 
@@ -71,6 +71,10 @@ class X1080XSource:
             return partition, ""
         return self.board_id, LEGACY_CATEGORIES.get(str(partition), str(partition))
 
+    def partition_label(self, partition):
+        board, category = self.partition_ids(partition)
+        return f"board_id={board} category_id={category or '-'}"
+
     def detail_url(self, resource_id) -> str:
         return f"{self.base_url}/resources/{resource_id}?page=1&order=asc"
 
@@ -94,7 +98,9 @@ class X1080XSource:
             return result, None
         try:
             parsed = self.parser.parse_list_page(result.body, page)
-        except ListValidationError:
+        except ListValidationError as exc:
+            if isinstance(exc, SiteEntryPage):
+                return self._entry_page_result(typeid, page, result)
             # 只重试一次非目标页面，不能把重试失败或中间态当作列表到底。
             retry = http.fetch(self.list_url(typeid, page), stage="list")
             self._check_rate_limit(retry)
@@ -104,9 +110,17 @@ class X1080XSource:
             try:
                 parsed = self.parser.parse_list_page(result.body, page)
             except ListValidationError as exc:
+                if isinstance(exc, SiteEntryPage):
+                    return self._entry_page_result(typeid, page, result)
                 self.dump_empty_list_page(typeid, page, result.body)
                 return replace(result, error_type="invalid_list", error_message=str(exc)), None
         return result, parsed
+
+    def _entry_page_result(self, partition, page, result):
+        self.dump_empty_list_page(partition, page, result.body)
+        log.warning("x1080x 返回欢迎入口页，停止本轮；请检查 x1080x.base_url 与 "
+                    f"CRAWLER_X1080X_BASE_URL: url={redact_url(result.url)}")
+        return replace(result, error_type="session_paused", error_message="site_entry_required"), None
 
     def dump_empty_list_page(self, typeid: str, page: int, body) -> None:
         """首个列表页就解析出 0 条时留现场：告警并把响应体落盘。
@@ -125,14 +139,16 @@ class X1080XSource:
                 return
             debug_dir = Path(__file__).resolve().parents[3] / "data" / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            dump_path = debug_dir / f"x1080x_list_{typeid}_p{page}.html"
+            board, category = self.partition_ids(typeid)
+            dump_path = debug_dir / f"x1080x_list_{category or board}_p{page}.html"
             dump_path.write_bytes(self._safe_debug_html(raw))
             dump_note = f" dump={dump_path}"
         except OSError as exc:
             dump_note = f" dump_failed={exc}"
         log.warning(
-            "x1080x 列表页解析为 0 条（疑似结构变化或非目标页面）: "
-            f"typeid={typeid} page={page} bytes={len(raw)} "
+            "x1080x 列表响应不是有效资源页: "
+            f"{self.partition_label(typeid)} page={page} bytes={len(raw)} "
+            f"url={redact_url(self.list_url(typeid, page))} "
             f"title={title!r}{dump_note}"
         )
 
@@ -161,7 +177,8 @@ class X1080XSource:
                     list_failures += 1
                     log.warning(
                         "x1080x 列表页获取失败: "
-                        f"typeid={typeid} page={page} "
+                        f"{self.partition_label(typeid)} page={page} "
+                        f"url={redact_url(result.url)} "
                         f"error_type={result.error_type}"
                     )
                     break
@@ -173,7 +190,7 @@ class X1080XSource:
                 signature = frozenset(tids)
                 if signature in seen_pages:
                     list_failures += 1
-                    log.warning(f"x1080x 分类 {typeid} 第 {page} 页重复，停止该分类")
+                    log.warning(f"x1080x {self.partition_label(typeid)} 第 {page} 页重复，停止该分类")
                     break
                 seen_pages.add(signature)
                 for tid in tids:
@@ -217,6 +234,8 @@ class X1080XSource:
                 category_id=str(metadata.get("category_id") or metadata.get("typeid") or ""),
                 section=str(metadata.get("section") or ""))
         except DetailValidationError as exc:
+            if exc.reason == "site_entry_required":
+                raise SourcePaused(exc.reason, f"x1080x 详情返回欢迎入口页，请检查域名: {redact_url(target.url)}") from None
             if exc.reason not in {"membership_required", "login_required"}:
                 self._diagnose_detail(target.key, result, exc.reason)
             raise

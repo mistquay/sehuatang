@@ -14,7 +14,7 @@ from scrapers.core.models import FetchResult
 from scrapers.sources.x1080x.auth import Authenticator, AuthSettings
 from scrapers.sources.x1080x.attachments import collect_free_torrents, free_preview, torrent_magnet
 from scrapers.sources.x1080x.http_client import SessionResult, X1080XHttpClient
-from scrapers.sources.x1080x.parser import ListValidationError, X1080XParser
+from scrapers.sources.x1080x.parser import ListValidationError, SiteEntryPage, X1080XParser
 from scrapers.sources.x1080x.source import DEFAULT_BOARD_ID, X1080XSource
 from tests.crawler_core_tests import CrawlEngineTests
 
@@ -55,6 +55,24 @@ TORRENT = b'd4:info' + INFO + b'e'
 
 
 class ParserTests(unittest.TestCase):
+    def test_legacy_category_is_an_input_alias_for_the_new_string_id(self):
+        source = X1080XSource({"typeids": {"5479": "中文字幕"}})
+        self.assertEqual(f"https://1080xin.com/boards/{DEFAULT_BOARD_ID}?page=1&category_id={CAT}", source.list_url("5479", 1))
+        self.assertEqual(f"board_id={DEFAULT_BOARD_ID} category_id={CAT}", source.partition_label("5479"))
+        target = source.make_target(RID, "5479", "中文字幕")
+        self.assertEqual(CAT, target.metadata["category_id"])
+        self.assertEqual(RID, target.key)
+
+    def test_welcome_page_is_not_a_list_or_a_resource(self):
+        body = '<title>歡迎訪問 · x1080x</title><a href="01.html">進入</a>'.encode()
+        parser = X1080XParser()
+        with self.assertRaises(SiteEntryPage):
+            parser.parse_list_page(body, 1)
+        with self.assertRaises(DetailValidationError) as caught:
+            parser.parse_resource(body, URL, resource_id=RID)
+        self.assertEqual("site_entry_required", caught.exception.reason)
+        self.assertEqual([RID], parser.parse_list_page(b'<title>Welcome</title>' + listing(), 1).tids)
+
     def test_first_post_title_date_category_and_images(self):
         parser = X1080XParser({CAT: "中文字幕"})
         body = detail(MAGNET.replace("&", "&amp;") + '<img src="/cover.jpg"><img src="/a.gif">')
@@ -184,6 +202,29 @@ class CollectionTests(unittest.TestCase):
 
 
 class AuthenticationTests(unittest.TestCase):
+    def test_welcome_list_stops_immediately_without_retrying_other_categories(self):
+        source = X1080XSource({"categories": {CAT: "中文字幕", "another": "其他"}}, diagnostics=False)
+        http = Mock()
+        body = '<title>歡迎訪問 · x1080x</title>'.encode()
+        http.fetch.return_value = FetchResult(URL, body, 200, 1, 0)
+        failures = CrawlEngineTests.FakeFailureStore()
+        summary = CrawlEngine(http, failures).run(source, CrawlEngineTests.FakeRepository())
+        self.assertEqual("site_entry_required", summary.details["source_paused"])
+        self.assertEqual(1, http.fetch.call_count)
+        self.assertEqual([], failures.failures)
+
+    def test_welcome_detail_pauses_without_attempting_login(self):
+        source = X1080XSource({}, diagnostics=False)
+        client = Mock()
+        target = source.make_target(RID, CAT, "中文字幕")
+        body = '<title>欢迎访问 · x1080x</title>'.encode()
+        result = SessionResult(target.url, body, 200, 1, 0, client=client)
+        with self.assertRaises(SourcePaused) as caught:
+            source.collect_detail(target, result, Mock(), CrawlContext("x1080x", "offline"))
+        self.assertEqual("site_entry_required", caught.exception.reason)
+        client.ensure_authenticated.assert_not_called()
+        client.render_public.assert_not_called()
+
     def client(self, enabled=True):
         client = Mock()
         client.is_authenticated.side_effect = [False, True]

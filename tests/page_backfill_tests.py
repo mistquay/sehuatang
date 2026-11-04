@@ -107,6 +107,16 @@ class X1080XBackfillTests(unittest.TestCase):
             "detail1002": source.detail_url("1002"),
         }
 
+    def test_welcome_page_stops_all_partitions_without_advancing_checkpoint(self):
+        urls = self._urls()
+        scraper = self._scraper({urls["list1"]: '<title>歡迎訪問 · x1080x</title>'.encode()})
+        scraper.config["typeids"]["5206"] = "亚洲有码"
+        summary = scraper.backfill_pages(1, 2, checkpoint_store=self.checkpoints, dry_run=True)
+        self.assertEqual("site_entry_required", summary["stopped"])
+        self.assertEqual(0, self.checkpoints.load("x1080x", "5479"))
+        self.assertEqual([], self.saved_items)
+        self.assertEqual([urls["list1"]], scraper.http.fetched)
+
     def test_backfills_page_range_and_advances_checkpoint(self):
         urls = self._urls()
         scraper = self._scraper({

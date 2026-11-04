@@ -148,7 +148,7 @@ class X1080XScraper:
                 if completed:
                     first_page = max(start_page, completed + 1)
                     log.info(
-                        f"x1080x 分类 {typeid} 从检查点第 {first_page} 页继续"
+                        f"x1080x {source.partition_label(typeid)} 从检查点第 {first_page} 页继续"
                     )
             partition_summary = {
                 "section": section,
@@ -166,7 +166,7 @@ class X1080XScraper:
                     summary["failed"] += 1
                     log.warning(
                         "x1080x 补抓列表页失败，该分类暂停（检查点未推进，可 --resume 继续）: "
-                        f"typeid={typeid} page={page} error_type={result.error_type}"
+                        f"{source.partition_label(typeid)} page={page} error_type={result.error_type}"
                     )
                     if result.error_type == "cf_blocked":
                         summary["stopped"] = "cf_blocked"
@@ -177,7 +177,7 @@ class X1080XScraper:
                 tids = parsed.tids
                 if not tids:
                     partition_summary["stopped"] = f"exhausted@{page}"
-                    log.info(f"x1080x 分类 {typeid} 第 {page} 页无内容，视为到底")
+                    log.info(f"x1080x {source.partition_label(typeid)} 第 {page} 页无内容，视为到底")
                     break
                 signature = frozenset(tids)
                 if signature in seen_pages:
@@ -197,7 +197,7 @@ class X1080XScraper:
                     FixedTargetSource(source, targets),
                     repository,
                     dry_run=dry_run,
-                    page_context=f"source=x1080x partition={typeid} page={page}",
+                    page_context=f"source=x1080x {source.partition_label(typeid)} page={page}",
                 )
                 summary["pages_scanned"] += 1
                 summary["discovered"] += len(targets)
