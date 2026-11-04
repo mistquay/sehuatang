@@ -8,7 +8,7 @@
 - 浏览器和响应 HTML 可确认使用 Next.js；这不等于已确认其后端语言或数据库。
 - 新版板块、分类、资源使用 22 位字母数字字符串 ID，不能继续 `int(tid)`。
 - 正常完成验证并登录后，分类列表及详情正文可通过共享 Cookie 的普通 HTTP 请求取得，存在服务端渲染内容。暂不需要把整个采集引擎改成浏览器抓取。
-- 普通未验证请求返回过 Cloudflare 403；登录表单还使用 Turnstile。实测均由浏览器自动完成验证，没有人工解题。
+- 普通未验证请求返回过 Cloudflare 403；登录表单还使用 Turnstile。用户确认本次调查中的 CF 挑战由用户手动完成；之前把页面后来可用归因于自动验证的结论不成立。
 - 登录成功，会员中心显示提供的账号为“注册会员”。该账号可以免费下载实测免费附件，但无法读取实测超过六小时的 BT 综合区下载内容。
 - 资源至少有“正文直接出现磁链”和“附件 torrent”两种形式，应并列支持。
 - 本次仅登录、浏览和领取一份明确为免费的附件；未付费、未领取收费附件，未运行正式采集、数据库写入或通知。
@@ -127,16 +127,33 @@ idempotency_key
 
 登录后的 Cookie 包括 Cloudflare 通行、账号会话、只读会话、浏览器会话和 CSRF Cookie。不能只复制一项账号 Cookie，也不能把 CF 通过等同于账号登录完成。
 
-推荐先采用“浏览器完成登录和验证 + 同线路 HTTP 复用会话”的方式：
+用户确认只采集免费资源，并要求优先沿用服务器上已有的 Byparr，而不是默认采用人工导入 Cookie 的新流程。推荐采用“Byparr 处理 CF + 来源认证逻辑 + 同线路 HTTP 共享登录会话”的方式；认证初始化是否需要额外浏览器支持，须实测后决定：
 
 1. 凭据由环境变量或本机私有配置提供；禁止写入提交、示例配置、调试 HTML 或日志。
-2. 提供明确的登录初始化/续期入口，完成站点正常验证并取得当前会话。
+2. 优先复用现有 Byparr 服务处理 CF；提供明确的账号登录初始化/续期入口，不能把获得 `cf_clearance` 等同于账号登录成功。
 3. 列表、详情、预览与领取尽量走 HTTP；本次共享 Cookie 的 APIRequestContext 已验证可以读取分类 SSR 列表。
 4. 实现阶段再验证现有 `curl_cffi` 对 Cookie/UA 的复用效果；APIRequestContext 成功不等于已经验证 `curl_cffi` 和生产代理池。
 5. 一个账号先使用一条固定线路和低并发。会话、CSRF 和 CF 通行状态按线路维护；不直接把一组 Cookie 分发到不同出口。
 6. 失效后停止本轮、提示重新登录或续期；不让每个详情 worker 同时发起登录，也不反复提交账号密码。
 
-如果后续确认可稳定通过站点正常登录 API 完成全部认证，再简化掉浏览器初始化依赖。当前不承诺仅凭用户名密码的纯 HTTP 无人值守登录已经可用。
+如果后续确认可稳定通过站点正常登录 API 和 Byparr 完成全部认证，就不增加独立浏览器初始化依赖。当前不承诺仅凭用户名密码与现有 `/v1` 调用就已经能完成无人值守登录。
+
+### Byparr 官方能力核对与服务器实测边界
+
+2026-11-04 读取官方 `main` 分支源码确认：
+
+- [src/models.py](https://github.com/ThePhaseless/Byparr/blob/main/src/models.py)：`LinkRequest.cmd` 说明只支持 GET，模型没有账号填表、POST 业务数据、Cookie 导入或命名 session 字段。
+- [src/endpoints.py](https://github.com/ThePhaseless/Byparr/blob/main/src/endpoints.py)：`/v1` 收到请求后执行页面导航和 CF 检查，不根据 `cmd=request.post` 执行业务 POST。
+- [src/utils.py](https://github.com/ThePhaseless/Byparr/blob/main/src/utils.py)：每次请求创建浏览器 context，不能假设在两次 `/v1` 请求之间保留登录状态。
+- [src/challenge.py](https://github.com/ThePhaseless/Byparr/blob/main/src/challenge.py)：当前检测入口针对 CF 中间验证页。不能据此宣称登录表单内的 Turnstile 一定能自动完成。
+
+以上是官方源码能力，不是对用户服务器版本的现场验证；服务可能是旧版本或分支版本。
+
+现有 `FlareSolverrClient` 会在请求 JSON 中传入 `cookies`，但官方当前 Byparr 请求模型未接收该字段。因此不能仅根据本地发出了 `cookies` 就声称远端成功注入了账号 Cookie。
+
+torrent 预览、领取 POST、文件 GET 应使用爬虫持有的同一份账号 Cookie、CSRF 和固定线路，不需要把每个下载请求都转给 Byparr。命中可恢复 CF 挑战时调用 Byparr 更新通行状态，再重试原业务请求；更新通行 Cookie 时保留账号 Cookie。领取重试仍复用原幂等键，并重新处理价格/版本冲突。
+
+下一步需要用户提供现有 Byparr 的可访问地址与镜像版本（或已有服务器连接信息），进行只读的版本、普通页面 CF、登录页内嵌验证测试。未验证前不更改服务器部署。
 
 ## 5. 建议代码调整
 
