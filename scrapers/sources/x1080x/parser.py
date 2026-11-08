@@ -36,6 +36,10 @@ class SiteEntryPage(ListValidationError):
     """欢迎/入口页不能解释为资源列表或末页。"""
 
 
+class BrowserPassRequired(ListValidationError):
+    """初始页面需要浏览器验证后才能异步加载列表。"""
+
+
 @dataclass(frozen=True)
 class ListPage:
     tids: List[int | str]
@@ -114,6 +118,9 @@ class X1080XParser:
             raise SiteEntryPage("返回站点欢迎入口页，请检查当前域名或入口验证")
         if soup.select_one(".thread-list"):
             return self._parse_resource_list(soup, html_content, expected_page)
+        scripts = "\n".join(node.get_text() for node in soup.select("script"))
+        if re.search(r'"browserPassRequired"\s*:\s*true', scripts.replace('\\"', '"')):
+            raise BrowserPassRequired("列表需要浏览器完成 BrowserPass 验证后加载")
         scope = soup.select_one("#threadlist")
         if scope is None or self.is_unavailable(soup, soup.get_text(" ", strip=True)[:2000]):
             raise ListValidationError("缺少普通列表结构或站点不可用")

@@ -14,7 +14,7 @@ from scrapers.core.models import FetchResult
 from scrapers.sources.x1080x.auth import Authenticator, AuthSettings
 from scrapers.sources.x1080x.attachments import collect_free_torrents, free_preview, torrent_magnet
 from scrapers.sources.x1080x.http_client import SessionResult, X1080XHttpClient
-from scrapers.sources.x1080x.parser import ListValidationError, SiteEntryPage, X1080XParser
+from scrapers.sources.x1080x.parser import BrowserPassRequired, ListValidationError, SiteEntryPage, X1080XParser
 from scrapers.sources.x1080x.source import DEFAULT_BOARD_ID, X1080XSource
 from tests.crawler_core_tests import CrawlEngineTests
 
@@ -41,6 +41,13 @@ def listing(page=1, maximum=3):
             f'<a class="resource-title" href="/resources/{OTHER}">公告</a></article>'
             f'<article class="topic-card"><a class="resource-title" href="/resources/{RID}?return=abc">主题</a>'
             f'<a class="resource-title" href="/resources/{RID}">重复</a></article></div>').encode()
+
+
+def browser_pass_listing(required=True):
+    # 站点初始 Flight 数据只有 BoardAdmissionRecovery，列表在验证后异步加载。
+    flight = json.dumps({"boardId": DEFAULT_BOARD_ID, "browserPassRequired": required})
+    return ('<title>無碼BT - x1080x</title><main><div class="loading"></div></main>'
+            f'<script>self.__next_f.push([1,{json.dumps(flight)}])</script>').encode()
 
 
 def preview(**kwargs):
@@ -113,6 +120,119 @@ class ParserTests(unittest.TestCase):
         target = source.normalize_target(CrawlTarget(RID, "https://old.example/x"))
         self.assertEqual(f"https://new.example/resources/{RID}?page=1&order=asc", target.url)
         self.assertIsNone(source.normalize_target(CrawlTarget("12345", "https://old.example/x")))
+
+
+class BrowserPassListTests(unittest.TestCase):
+    def test_initial_flight_requires_rendering_but_loaded_list_does_not(self):
+        parser = X1080XParser()
+        with self.assertRaises(BrowserPassRequired):
+            parser.parse_list_page(browser_pass_listing(), 1)
+        with self.assertRaises(ListValidationError) as caught:
+            parser.parse_list_page(browser_pass_listing(False), 1)
+        self.assertNotIsInstance(caught.exception, BrowserPassRequired)
+        self.assertEqual([RID], parser.parse_list_page(browser_pass_listing() + listing(), 1).tids)
+
+    def fetch(self, body, *, rendered=None):
+        self.source = X1080XSource({"categories": {CAT: "中文字幕"}}, diagnostics=False)
+        self.client = Mock()
+        self.client.render_list.return_value = listing() if rendered is None else rendered
+        self.http = Mock()
+        self.http.fetch.return_value = SessionResult(
+            self.source.list_url(CAT, 1), body, 200, 1, 10, client=self.client)
+        return self.source.fetch_list_page(self.http, CAT, 1)
+
+    def test_shell_renders_once_on_the_same_client_and_keeps_pagination(self):
+        result, parsed = self.fetch(browser_pass_listing())
+        self.assertTrue(result.ok)
+        self.assertEqual([RID], parsed.tids)
+        self.assertEqual(3, parsed.last_page)
+        self.assertEqual(2, result.attempts)
+        self.http.fetch.assert_called_once()
+        self.client.render_list.assert_called_once_with(self.source.list_url(CAT, 1))
+        self.client.ensure_authenticated.assert_not_called()
+
+    def test_normal_list_never_invokes_browser(self):
+        result, parsed = self.fetch(listing())
+        self.assertTrue(result.ok)
+        self.client.render_list.assert_not_called()
+
+    def test_unfinished_browser_pass_pauses_without_repeating_requests(self):
+        result, parsed = self.fetch(browser_pass_listing(), rendered=browser_pass_listing())
+        self.assertIsNone(parsed)
+        self.assertEqual("session_paused", result.error_type)
+        self.assertEqual("browser_pass_required", result.error_message)
+        self.http.fetch.assert_called_once()
+        self.client.render_list.assert_called_once()
+
+    def test_rendered_wrong_page_and_incomplete_lists_still_fail_validation(self):
+        for rendered in (listing(page=2), b'<div class="thread-list"></div>'):
+            with self.subTest(rendered=rendered):
+                result, parsed = self.fetch(browser_pass_listing(), rendered=rendered)
+                self.assertIsNone(parsed)
+                self.assertEqual("invalid_list", result.error_type)
+                self.assertEqual(2, self.http.fetch.call_count)
+
+    def test_missing_browser_client_is_not_reported_as_empty_or_invalid(self):
+        source = X1080XSource({}, diagnostics=False)
+        http = Mock()
+        http.fetch.return_value = FetchResult(URL, browser_pass_listing(), 200, 1, 0)
+        result, parsed = source.fetch_list_page(http, CAT, 1)
+        self.assertIsNone(parsed)
+        self.assertEqual("browser_pass_required", result.error_message)
+        http.fetch.assert_called_once()
+
+    def test_solver_failure_stops_discovery_without_trying_other_partitions(self):
+        source = X1080XSource({"categories": {CAT: "中文字幕", "other": "其他"}}, diagnostics=False)
+        client = Mock()
+        client.render_list.side_effect = SourcePaused("browser_pass_required", "not ready")
+        http = Mock()
+        http.fetch.return_value = SessionResult(URL, browser_pass_listing(), 200, 1, 0, client=client)
+        with self.assertRaises(SourcePaused) as caught:
+            source.discover(CrawlContext("x1080x", "offline"), http)
+        self.assertEqual("browser_pass_required", caught.exception.reason)
+        http.fetch.assert_called_once()
+
+    def test_public_rendering_preserves_account_cookies_and_user_agent(self):
+        for authenticated in (False, True):
+            with self.subTest(authenticated=authenticated):
+                client = X1080XHttpClient(HttpSettings(), config={"cookie": "__Host-x1080x_session=account"})
+                self.addCleanup(client.close)
+                client._prepare_cookies(URL)
+                client.authenticated = authenticated
+                cookies = client.browser_cookies()
+                user_agent = client._user_agent
+                client._flaresolverr = Mock()
+                client._flaresolverr.solve.return_value = (
+                    listing(), [{"name": "__Host-x1080x_session", "value": "guest"}], "Guest UA")
+                self.assertEqual(listing(), client.render_list(URL))
+                self.assertEqual(cookies, client.browser_cookies())
+                self.assertEqual(user_agent, client._user_agent)
+                self.assertEqual(authenticated, client.authenticated)
+                client._flaresolverr.solve.assert_called_once_with(URL)
+
+    def test_missing_or_failed_solver_reports_browser_pass_required(self):
+        client = X1080XHttpClient(HttpSettings())
+        self.addCleanup(client.close)
+        for solver in (None, Mock()):
+            if solver:
+                solver.solve.return_value = None
+            client._flaresolverr = solver
+            with self.assertRaises(SourcePaused) as caught:
+                client.render_list(URL)
+            self.assertEqual("browser_pass_required", caught.exception.reason)
+
+    def test_rendering_keeps_rate_limit_and_blocked_failures_distinct(self):
+        from scrapers.core.cf_challenge import SiteBlocked, SiteRateLimited
+
+        for error, reason in ((SiteRateLimited(), "rate_limited"), (SiteBlocked(), "cf_blocked")):
+            with self.subTest(reason=reason):
+                client = X1080XHttpClient(HttpSettings())
+                self.addCleanup(client.close)
+                client._flaresolverr = Mock()
+                client._flaresolverr.solve.side_effect = error
+                with self.assertRaises(SourcePaused) as caught:
+                    client.render_list(URL)
+                self.assertEqual(reason, caught.exception.reason)
 
 
 class TorrentTests(unittest.TestCase):

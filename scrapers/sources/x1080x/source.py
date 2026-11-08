@@ -1,5 +1,6 @@
 """新版 x1080x 来源：正文磁链和免费 torrent 附件。"""
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -19,7 +20,7 @@ from scrapers.core.http import CrawlerHttpClient, redact_url
 from scrapers.core.models import FetchResult
 from util.log_util import log
 
-from .parser import X1080XParser, ListValidationError, SiteEntryPage
+from .parser import BrowserPassRequired, X1080XParser, ListValidationError, SiteEntryPage
 from .attachments import collect_free_torrents
 from util.javbee_code import normalize_code_key, resolve_x1080x_code
 
@@ -97,7 +98,9 @@ class X1080XSource:
         if not result.ok:
             return result, None
         try:
-            parsed = self.parser.parse_list_page(result.body, page)
+            result, parsed = self._parse_list_result(result, page)
+        except SourcePaused as exc:
+            return replace(result, error_type="session_paused", error_message=exc.reason), None
         except ListValidationError as exc:
             if isinstance(exc, SiteEntryPage):
                 return self._entry_page_result(typeid, page, result)
@@ -108,13 +111,34 @@ class X1080XSource:
             if not result.ok:
                 return result, None
             try:
-                parsed = self.parser.parse_list_page(result.body, page)
+                result, parsed = self._parse_list_result(result, page)
+            except SourcePaused as exc:
+                return replace(result, error_type="session_paused", error_message=exc.reason), None
             except ListValidationError as exc:
                 if isinstance(exc, SiteEntryPage):
                     return self._entry_page_result(typeid, page, result)
                 self.dump_empty_list_page(typeid, page, result.body)
                 return replace(result, error_type="invalid_list", error_message=str(exc)), None
         return result, parsed
+
+    def _parse_list_result(self, result, page):
+        try:
+            return result, self.parser.parse_list_page(result.body, page)
+        except BrowserPassRequired:
+            client = getattr(result, "client", None)
+            if client is None:
+                raise SourcePaused("browser_pass_required", "x1080x 列表需要同线路的 Byparr 浏览器加载") from None
+            log.info(f"x1080x 列表需要 BrowserPass，使用 Byparr 加载: url={redact_url(result.url)}")
+            started = time.monotonic()
+            body = client.render_list(result.url)
+            rendered = replace(result, body=body, attempts=result.attempts + 1,
+                               elapsed_ms=result.elapsed_ms + int((time.monotonic() - started) * 1000))
+            self._check_rate_limit(rendered)
+            try:
+                parsed = self.parser.parse_list_page(body, page)
+            except BrowserPassRequired:
+                raise SourcePaused("browser_pass_required", "x1080x 列表浏览器验证尚未完成，本轮暂停") from None
+            return rendered, parsed
 
     def _entry_page_result(self, partition, page, result):
         self.dump_empty_list_page(partition, page, result.body)
@@ -179,7 +203,7 @@ class X1080XSource:
                         "x1080x 列表页获取失败: "
                         f"{self.partition_label(typeid)} page={page} "
                         f"url={redact_url(result.url)} "
-                        f"error_type={result.error_type}"
+                        f"error_type={result.error_type} reason={result.error_message}"
                     )
                     break
 

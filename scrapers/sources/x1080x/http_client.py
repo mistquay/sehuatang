@@ -124,6 +124,28 @@ class X1080XHttpClient(SessionHttpClient):
             return None
         return self._bypass(url)
 
+    def render_list(self, url):
+        """仅渲染公开列表；Byparr 的游客会话不覆盖爬虫账号。"""
+        from scrapers.core.cf_challenge import SiteBlocked, SiteRateLimited
+
+        if not self._flaresolverr:
+            raise SourcePaused("browser_pass_required", "x1080x 列表需要 BrowserPass，请配置 Byparr 后重试")
+        with self._solve_lock:
+            self.gate.acquire()
+            if self.before_request:
+                self.before_request()
+            try:
+                solution = self._flaresolverr.solve(url)
+            except SiteRateLimited:
+                self.gate.limit()
+                raise SourcePaused("rate_limited", "x1080x 列表浏览器请求命中限流，本轮暂停") from None
+            except SiteBlocked:
+                raise SourcePaused("cf_blocked", "x1080x 列表浏览器请求被 Cloudflare 封锁") from None
+        if solution is None:
+            raise SourcePaused("browser_pass_required", "x1080x 列表浏览器验证未完成，请检查 Byparr")
+        body, _, _ = solution
+        return body
+
     def _api_fetch(self, method, path, *, data=None, csrf=None):
         url = urljoin(self.base_url + "/", path)
         if urlsplit(url).netloc != urlsplit(self.base_url).netloc or not url.startswith(self.base_url + "/api/"):
