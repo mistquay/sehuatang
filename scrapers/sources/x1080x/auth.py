@@ -40,7 +40,8 @@ class Authenticator:
         try:
             authenticated = client.is_authenticated(resource_id)
         except SourcePaused as exc:
-            if exc.reason == "rate_limited" or self.settings.mode in {"cookie", "disabled"}:
+            if (exc.reason not in {"cf_challenge", "browser_pass_required"}
+                    or self.settings.mode in {"cookie", "disabled"}):
                 raise
             authenticated = False
         if authenticated:
@@ -49,7 +50,10 @@ class Authenticator:
         client.authenticated = False
         cfg = self.settings
         if cfg.mode == "cookie":
-            raise SourcePaused("cookie_expired", "x1080x Cookie 缺失或已失效，请在管理页更新 Cookie；本轮暂停")
+            diagnostic = getattr(client, "auth_diagnostic", "")
+            detail = f"（{diagnostic}）" if isinstance(diagnostic, str) and diagnostic else ""
+            raise SourcePaused("cookie_expired", f"x1080x 服务端未确认账号登录态{detail}；"
+                               "请核对 Cookie、同出口和浏览器会话后更新，本轮暂停")
         if cfg.mode == "disabled" or not cfg.username or not cfg.password:
             raise SourcePaused("login_required", "x1080x 资源需要登录，请在管理页配置账号或手动 Cookie；本轮暂停")
         if cfg.mode in {"auto", "http"}:
@@ -84,8 +88,9 @@ class Authenticator:
 
 
 def login_in_browser(client, settings, resource_id):
+    progress = {"stage": "browser_start"}
     try:
-        return asyncio.run(_login_in_browser(client, settings, resource_id))
+        return asyncio.run(_login_in_browser(client, settings, resource_id, progress))
     except SourcePaused:
         raise
     except ImportError:
@@ -93,7 +98,33 @@ def login_in_browser(client, settings, resource_id):
                            "或使用 WITH_X1080X_BROWSER=true 构建镜像并安装浏览器") from None
     except Exception as exc:
         # 浏览器异常可能包含输入内容、请求参数或 Cookie；只报告异常类型。
-        raise SourcePaused("authentication_failed", f"x1080x 无头登录未完成（{type(exc).__name__}）；本轮暂停") from None
+        raise SourcePaused("authentication_failed", f"x1080x 无头登录未完成：stage={progress['stage']} "
+                           f"{browser_error_hint(exc)}；本轮暂停") from None
+
+
+def browser_error_hint(exc):
+    """只输出固定诊断标签；浏览器原始异常可能携带 Cookie、密码和 URL 参数。"""
+    message = str(exc).lower()
+    hint = "timeout" if isinstance(exc, TimeoutError) else "browser_error"
+    for marker, label in (("executable", "executable_unavailable"), ("xvfb", "display_unavailable"),
+                          ("shared librar", "library_unavailable"), ("closed", "browser_closed"),
+                          ("timeout", "timeout"), ("proxy", "proxy_error")):
+        if marker in message:
+            hint = label
+            break
+    return f"error_type={type(exc).__name__} hint={hint}"
+
+
+def browser_proxy(settings):
+    if not settings.proxy.enabled:
+        return None
+    from urllib.parse import unquote
+    parsed = urlsplit(settings.proxy.url)
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    proxy = {"server": f"{parsed.scheme}://{host}" + (f":{parsed.port}" if parsed.port else "")}
+    if parsed.username:
+        proxy.update(username=unquote(parsed.username), password=unquote(parsed.password or ""))
+    return proxy
 
 
 async def _click_verification(page):
@@ -125,29 +156,25 @@ async def _verified_session(page, context, client, resource_id, deadline):
     raise SourcePaused("authentication_failed", "x1080x 浏览器内登录状态验证未通过，本轮暂停")
 
 
-async def _login_in_browser(client, settings, resource_id):
+async def _login_in_browser(client, settings, resource_id, progress):
     # 与当前 Byparr 3.x 使用同族 Firefox 运行时，避免拿 Firefox CF Cookie 配 Chromium 指纹。
     from invisible_playwright.async_api import InvisiblePlaywright
 
-    proxy = None
-    if client.settings.proxy.enabled:
-        parsed = urlsplit(client.settings.proxy.url)
-        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-        proxy = {"server": f"{parsed.scheme}://{host}" + (f":{parsed.port}" if parsed.port else "")}
-        if parsed.username:
-            from urllib.parse import unquote
-            proxy.update(username=unquote(parsed.username), password=unquote(parsed.password or ""))
+    proxy = browser_proxy(client.settings)
     deadline = time.monotonic() + settings.timeout
     async with InvisiblePlaywright(headless=settings.headless, proxy=proxy, humanize=True) as browser:
         context = await browser.new_context()
         try:
             await context.add_cookies(client.browser_cookies())
             page = await context.new_page()
+            progress["stage"] = "login_page"
             await page.goto(client.base_url + "/login", wait_until="commit",
                             timeout=int(settings.timeout * 1000))
             next_click = 0.0
+            progress["stage"] = "login_page_verification"
             while time.monotonic() < deadline:
                 if urlsplit(page.url).path == "/profile":
+                    progress["stage"] = "session_verification"
                     await page.wait_for_load_state("domcontentloaded")
                     return await _verified_session(page, context, client, resource_id, deadline)
                 username = page.locator("#auth-username")
@@ -160,11 +187,13 @@ async def _login_in_browser(client, settings, resource_id):
             else:
                 raise SourcePaused("authentication_failed", "x1080x 无头浏览器未通过登录页 CF 验证")
             announcement = page.get_by_role("dialog").filter(has_text="網站升級完工公告")
+            progress["stage"] = "login_form"
             if await announcement.count() and await announcement.is_visible():
                 await announcement.get_by_role("button", name="關閉對話框").click()
             await page.locator("#auth-username").fill(settings.username)
             await page.locator("#auth-password").fill(settings.password)
             submit = page.locator('.member-form button[type="submit"]')
+            progress["stage"] = "login_form_verification"
             while time.monotonic() < deadline:
                 if await submit.is_enabled():
                     break
@@ -174,9 +203,11 @@ async def _login_in_browser(client, settings, resource_id):
                 await asyncio.sleep(0.5)
             else:
                 raise SourcePaused("authentication_failed", "x1080x 登录表单 Turnstile 验证未完成")
+            progress["stage"] = "login_submit"
             await submit.click()
             await page.wait_for_url(lambda url: urlsplit(str(url)).path != "/login",
                                     timeout=max(1, int((deadline - time.monotonic()) * 1000)))
+            progress["stage"] = "session_verification"
             return await _verified_session(page, context, client, resource_id, deadline)
         finally:
             await context.close()

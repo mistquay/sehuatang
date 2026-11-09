@@ -1,11 +1,14 @@
 """x1080x 抓取入口，使用公共爬虫引擎。"""
 import os
+import time
+import uuid
 from typing import Dict, Optional
 
 from scrapers.core.config import load_source_settings, load_storage_settings
-from scrapers.core.contracts import CrawlTarget
+from scrapers.core.contracts import CrawlContext, CrawlTarget, SourcePaused
 from scrapers.core.engine import CrawlEngine
 from scrapers.core.http import CrawlerHttpClient
+from scrapers.core.models import RunSummary
 from scrapers.infrastructure import build_failure_store
 from scrapers.page_backfill import FixedTargetSource, PageCheckpointStore, build_checkpoint_store
 from scrapers.sources.x1080x import X1080XRepository, X1080XSource
@@ -65,14 +68,13 @@ class X1080XScraper:
             on_saved=self._enqueue_new_items if notify else None,
             non_retryable_lookup=lambda keys: self.failure_store.non_retryable_keys("x1080x", keys),
         )
-        summary = CrawlEngine(self.http, self.failure_store, getattr(self, "storage_settings", None)).run(
-            source,
-            repository,
-            dry_run=dry_run,
-            retry_failed=retry_failed,
-        )
-        summary.details["existing"] = repository.existing_count
-        summary.details["skipped_restricted"] = repository.skipped_restricted
+        engine = CrawlEngine(self.http, self.failure_store, getattr(self, "storage_settings", None))
+        if retry_failed:
+            summary = engine.run(source, repository, dry_run=dry_run, retry_failed=True)
+            summary.details.update(existing=repository.existing_count,
+                                   skipped_restricted=repository.skipped_restricted)
+        else:
+            summary = self._crawl_pages(source, repository, engine, dry_run)
         result = summary.as_dict()
         if result["skipped_restricted"] and not result["requested"]:
             log.warning(
@@ -91,6 +93,45 @@ class X1080XScraper:
             f"saved={result['saved']} updated={result['updated']}"
         )
         return result
+
+    def _crawl_pages(self, source, repository, engine, dry_run):
+        started = time.monotonic()
+        summary = RunSummary(source.name, uuid.uuid4().hex)
+        summary.details.update(pages=0, list_pages_failed=0, list_retries=0, discovery_retries=0,
+                               existing=0, skipped_restricted=0)
+        context = CrawlContext(source.name, summary.run_id, dry_run)
+        try:
+            for batch in source.discover_pages(context, self.http):
+                summary.discovered += len(batch.targets)
+                summary.failed += batch.failed
+                for key in ("pages", "list_pages_failed", "list_retries", "discovery_retries"):
+                    summary.details[key] += batch.details.get(key, 0)
+                summary.retries += batch.details.get("list_retries", 0)
+                if not batch.targets:
+                    continue
+                partition, page = batch.details["partition"], batch.details["page"]
+                result = engine.run(FixedTargetSource(source, batch.targets), repository,
+                                    dry_run=dry_run, run_id=summary.run_id,
+                                    page_context=f"{source.partition_label(partition)} page={page}")
+                for key in ("requested", "succeeded", "failed", "saved", "updated", "retries"):
+                    setattr(summary, key, getattr(summary, key) + getattr(result, key))
+                summary.details["existing"] += repository.existing_count
+                summary.details["skipped_restricted"] += repository.skipped_restricted
+                for key, value in result.details.items():
+                    if isinstance(value, bool) or key == "source_paused":
+                        summary.details[key] = value
+                    elif isinstance(value, int):
+                        summary.details[key] = summary.details.get(key, 0) + value
+                if (result.details.get("source_paused") or result.details.get("cf_blocked")
+                        or result.details.get("rate_limited")):
+                    break
+        except SourcePaused as exc:
+            summary.failed = (max(1, summary.failed) if exc.reason == "list_unavailable"
+                              else summary.failed + 1)
+            summary.details["source_paused"] = exc.reason
+            log.warning(str(exc))
+        summary.elapsed_ms = int((time.monotonic() - started) * 1000)
+        return summary
 
     def _enqueue_new_items(self, payloads):
         """每批成功保存后立即入队，后续抓取不等待图片下载与 Telegram。"""

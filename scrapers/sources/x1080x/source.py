@@ -56,7 +56,7 @@ class X1080XSource:
             for key, value in (DEFAULT_TYPE_MAP if configured_typeids is None else configured_typeids).items()
         }
         self.boards = {str(k): str(v) for k, v in (self.config.get("boards") or {}).items()}
-        self.type_map.update(self.boards)
+        self.type_map = {**self.boards, **self.type_map}
         self.page_limit = max(1, int(self.config.get("page_limit", 3)))
         self.parser = parser or X1080XParser(self.type_map)
 
@@ -127,8 +127,8 @@ class X1080XSource:
         except BrowserPassRequired:
             client = getattr(result, "client", None)
             if client is None:
-                raise SourcePaused("browser_pass_required", "x1080x 列表需要同线路的 Byparr 浏览器加载") from None
-            log.info(f"x1080x 列表需要 BrowserPass，使用 Byparr 加载: url={redact_url(result.url)}")
+                raise SourcePaused("browser_pass_required", "x1080x 列表需要同线路的浏览器加载") from None
+            log.info(f"x1080x 列表需要 BrowserPass，使用同线路浏览器加载: url={redact_url(result.url)}")
             started = time.monotonic()
             body = client.render_list(result.url)
             rendered = replace(result, body=body, attempts=result.attempts + 1,
@@ -182,62 +182,67 @@ class X1080XSource:
         http: CrawlerHttpClient,
     ) -> DiscoveryResult:
         targets = []
+        details = {"pages": 0, "list_pages_failed": 0, "list_retries": 0, "discovery_retries": 0}
+        failed = 0
+        for batch in self.discover_pages(context, http):
+            targets.extend(batch.targets)
+            failed += batch.failed
+            for key in details:
+                details[key] += batch.details.get(key, 0)
+        return DiscoveryResult(targets, failed, details)
+
+    def discover_pages(self, context, http):
+        """每次交出一页，调用方保存该页后才请求下一页。"""
         seen_tids = set()
-        list_failures = 0
-        list_retries = 0
         pages_fetched = 0
 
         for typeid, section in self.type_map.items():
             seen_pages = set()
             for page in range(1, self.page_limit + 1):
                 result, parsed = self.fetch_list_page(http, typeid, page)
-                list_retries += max(0, result.attempts - 1)
+                retries = max(0, result.attempts - 1)
+                details = {"pages": 0, "list_pages_failed": 0, "list_retries": retries,
+                           "discovery_retries": retries, "partition": typeid, "page": page}
                 self._check_rate_limit(result)
                 if not result.ok:
                     if result.error_type == "session_paused":
                         raise SourcePaused(result.error_message or "session_unavailable", "x1080x 列表会话不可用，本轮暂停")
                     if result.error_type == "cf_blocked":
-                        raise RuntimeError("x1080x 列表被 Cloudflare 明确封锁，停止本轮抓取")
-                    list_failures += 1
+                        raise SourcePaused("cf_blocked", "x1080x 列表被 Cloudflare 明确封锁，停止本轮抓取")
                     log.warning(
                         "x1080x 列表页获取失败: "
                         f"{self.partition_label(typeid)} page={page} "
                         f"url={redact_url(result.url)} "
                         f"error_type={result.error_type} reason={result.error_message}"
                     )
+                    yield DiscoveryResult([], 1, {**details, "list_pages_failed": 1})
                     break
 
                 pages_fetched += 1
                 tids = parsed.tids
                 if not tids:
+                    yield DiscoveryResult([], details={**details, "pages": 1})
                     break
                 signature = frozenset(tids)
                 if signature in seen_pages:
-                    list_failures += 1
                     log.warning(f"x1080x {self.partition_label(typeid)} 第 {page} 页重复，停止该分类")
+                    yield DiscoveryResult([], 1, {**details, "pages": 1, "list_pages_failed": 1})
                     break
                 seen_pages.add(signature)
+                targets = []
                 for tid in tids:
                     if tid in seen_tids:
                         continue
                     seen_tids.add(tid)
                     targets.append(self.make_target(tid, typeid, section))
+                log.info(f"x1080x 列表页解析完成: {self.partition_label(typeid)} page={page} "
+                         f"discovered={len(tids)} unique={len(targets)} elapsed_ms={result.elapsed_ms}")
+                yield DiscoveryResult(targets, details={**details, "pages": 1})
                 if parsed.last_page is not None and page >= parsed.last_page:
                     break
 
         if not pages_fetched:
-            raise RuntimeError("x1080x 所有分类列表页均获取失败")
-
-        return DiscoveryResult(
-            targets=targets,
-            failed=list_failures,
-            details={
-                "pages": pages_fetched,
-                "list_pages_failed": list_failures,
-                "list_retries": list_retries,
-                "discovery_retries": list_retries,
-            },
-        )
+            raise SourcePaused("list_unavailable", "x1080x 所有分类列表页均获取失败")
 
     def parse_detail(
         self,
@@ -305,7 +310,7 @@ class X1080XSource:
     @staticmethod
     def _check_rate_limit(result):
         if result.error_type == "rate_limited" or is_rate_limited(result.body):
-            raise RuntimeError("x1080x 命中站点限流，中止本轮增量抓取，等待下次调度")
+            raise SourcePaused("rate_limited", "x1080x 命中站点限流，中止本轮增量抓取，等待下次调度")
 
     @staticmethod
     def _safe_debug_html(raw):

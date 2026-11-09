@@ -95,7 +95,12 @@ def _iso_utc(value):
 
 def _restart_process() -> None:
     log.info("管理页触发重启，等待通知队列收尾后重新执行")
+    from scrapers.core.pool import stop_shared_clients
+    from scrapers.core.storage import drain_writers
     from notifications.memory_queue import shutdown_notifications
+    # execv 不执行 finally/atexit；先关闭常驻浏览器、HTTP 和已入队写入。
+    stop_shared_clients()
+    drain_writers()
     shutdown_notifications()
     try:
         os.execv(sys.executable, [sys.executable] + sys.argv)

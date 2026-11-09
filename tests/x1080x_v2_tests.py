@@ -4,7 +4,7 @@ import json
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from curl_cffi import requests
 from scrapers.core.config import HttpSettings, ProxySettings, RetrySettings
@@ -123,6 +123,11 @@ class ParserTests(unittest.TestCase):
 
 
 class BrowserPassListTests(unittest.TestCase):
+    def setUp(self):
+        runtime = patch("scrapers.sources.x1080x.http_client.ListBrowser.available", return_value=False)
+        runtime.start()
+        self.addCleanup(runtime.stop)
+
     def test_initial_flight_requires_rendering_but_loaded_list_does_not(self):
         parser = X1080XParser()
         with self.assertRaises(BrowserPassRequired):

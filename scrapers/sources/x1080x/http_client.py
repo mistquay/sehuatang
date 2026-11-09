@@ -8,7 +8,7 @@ from functools import lru_cache, partial
 from http.cookies import SimpleCookie
 from urllib.parse import urljoin, urlsplit
 
-from scrapers.core.cf_challenge import is_cf_challenge, is_rate_limited, merge_solution_cookies
+from scrapers.core.cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited, merge_solution_cookies
 from scrapers.core.contracts import SourcePaused
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.core.models import FetchResult
@@ -17,6 +17,7 @@ from scrapers.core.network import proxy_label
 from scrapers.core.session import SessionHttpClient
 from scrapers.core.pool import shared_pool, stop_shared_clients
 from .auth import Authenticator, AuthSettings
+from .list_browser import ListBrowser
 from util.log_util import log
 
 
@@ -32,11 +33,17 @@ class X1080XHttpClient(SessionHttpClient):
         self.config = config or {}
         self.authenticator = Authenticator(AuthSettings.from_config(self.config))
         self._auth_lock = threading.Lock()
+        self._list_browser = None
+        self._list_renderer = str((self.config.get("challenge") or {}).get("list_renderer", "auto"))
+        if self._list_renderer not in {"auto", "browser", "byparr"}:
+            raise ValueError("x1080x.challenge.list_renderer 只支持 auto/browser/byparr")
         self.authenticated = False
+        self.auth_diagnostic = "http=unknown"
         cookie = SimpleCookie()
         cookie.load(str(self.config.get("cookie") or ""))
         self._initial_cookies = [{"name": key, "value": item.value, "secure": True}
                                  for key, item in cookie.items()]
+        self._protect_account_cookies = bool(self._initial_cookies)
         if self._initial_cookies:
             self.authenticated = True  # 先保护配置的账号 Cookie；使用前仍会验证真实状态。
 
@@ -49,7 +56,13 @@ class X1080XHttpClient(SessionHttpClient):
 
     def fetch(self, url, stage="detail", **kwargs):
         try:
-            result = super().fetch(url, stage, **kwargs)
+            if stage == "list" and self._list_browser is not None:
+                # 已建立的浏览器会话直接翻页，避免 HTTP 先遇 CF 后重复解题。
+                started = time.monotonic()
+                body = self.render_list(url)
+                result = FetchResult(url, body, 200, 1, int((time.monotonic() - started) * 1000))
+            else:
+                result = super().fetch(url, stage, **kwargs)
         except SourcePaused as exc:
             result = FetchResult(url, None, None, 0, 0, "session_paused", exc.reason)
         return SessionResult(**vars(result), client=self)
@@ -73,6 +86,7 @@ class X1080XHttpClient(SessionHttpClient):
                 self._user_agent = user_agent
             self._cookie_version += 1
             self._failed_validation_version = None
+            self._protect_account_cookies = True
 
     def ensure_authenticated(self, resource_id):
         with self._auth_lock:
@@ -80,14 +94,36 @@ class X1080XHttpClient(SessionHttpClient):
 
     def is_authenticated(self, resource_id):
         result = self._api_fetch("GET", f"/api/resources/{resource_id}/state")
-        if result.status_code in {401, 403}:
-            return False
-        if not result.ok:
-            raise SourcePaused(result.error_type or "session_unavailable", "x1080x 登录状态检查失败，本轮暂停")
+        if is_cf_blocked(result.body):
+            raise SourcePaused("cf_blocked", "x1080x 登录状态检查被 Cloudflare 明确封锁，本轮暂停")
+        if is_cf_challenge(result.body, result.status_code):
+            raise SourcePaused("cf_challenge", "x1080x 登录状态检查仍返回 CF 验证页，本轮暂停")
         try:
-            return json.loads(result.body).get("authenticated") is True
-        except (ValueError, AttributeError):
-            raise SourcePaused("session_unavailable", "x1080x 登录状态响应无效，本轮暂停") from None
+            value = json.loads(result.body or b"null")
+        except ValueError:
+            value = None
+        value = value if isinstance(value, dict) else {}
+        error = value.get("error") or value.get("code")
+        if isinstance(error, dict):
+            error = error.get("code")
+        # 只记录约定的机器错误码，绝不回显响应正文、用户信息和票据。
+        known = {"unauthenticated", "login_required", "session_expired", "invalid_session",
+                 "not_authenticated", "unauthorized", "browser_pass_required", "membership_required",
+                 "forbidden", "csrf_failed", "invalid_csrf"}
+        code = error if isinstance(error, str) and error in known else "unknown"
+        state = value.get("authenticated")
+        self.auth_diagnostic = f"http={result.status_code} authenticated={state if type(state) is bool else 'missing'} code={code}"
+        if result.ok and state is True:
+            return True
+        self.log.warning(f"x1080x 登录状态校验未通过: {self.auth_diagnostic}")
+        if code == "browser_pass_required":
+            raise SourcePaused("browser_pass_required", "x1080x 账号请求需要 BrowserPass，本轮暂停")
+        if (result.status_code == 401 or (result.status_code in {200, 403} and state is False)
+                or (result.status_code == 403 and code in {"unauthenticated", "login_required",
+                    "session_expired", "invalid_session", "not_authenticated", "unauthorized"})):
+            return False
+        reason = "session_forbidden" if result.status_code == 403 else "session_unavailable"
+        raise SourcePaused(reason, f"x1080x 登录状态响应未确认登录态（{self.auth_diagnostic}）；本轮暂停")
 
     def _refresh_cf(self, url):
         if not self._flaresolverr:
@@ -111,7 +147,7 @@ class X1080XHttpClient(SessionHttpClient):
                 self._failed_validation_version = None
 
     def _resolve_challenge(self, url, version):
-        if not self.authenticated:
+        if not self.authenticated and not self._protect_account_cookies:
             return super()._resolve_challenge(url, version)
         self._refresh_cf(url)
         retry = self._transport.fetch(url, "cf_authenticated_retry")
@@ -120,21 +156,39 @@ class X1080XHttpClient(SessionHttpClient):
         raise SourcePaused("cf_challenge", "x1080x 已保留账号会话，但 CF 后重试未通过；本轮暂停")
 
     def render_public(self, url):
-        if self.authenticated:
+        if self.authenticated or self._protect_account_cookies:
             return None
         return self._bypass(url)
 
     def render_list(self, url):
-        """仅渲染公开列表；Byparr 的游客会话不覆盖爬虫账号。"""
+        """优先复用独立游客浏览器；缺少可选运行时时才回退 Byparr。"""
         from scrapers.core.cf_challenge import SiteBlocked, SiteRateLimited
 
-        if not self._flaresolverr:
-            raise SourcePaused("browser_pass_required", "x1080x 列表需要 BrowserPass，请配置 Byparr 后重试")
         with self._solve_lock:
             self.gate.acquire()
             if self.before_request:
                 self.before_request()
             try:
+                if self._list_renderer != "byparr":
+                    if self._list_browser is None and ListBrowser.available():
+                        self._list_browser = ListBrowser(self.settings, self.base_url,
+                                                         self.authenticator.settings.timeout)
+                    if self._list_browser is not None:
+                        try:
+                            return self._list_browser.render(url)
+                        except SourcePaused as exc:
+                            if exc.reason == "rate_limited":
+                                self.gate.limit()
+                            if exc.reason != "browser_unavailable" or self._list_renderer == "browser":
+                                raise
+                            self.log.warning(str(exc) + "；改用已配置的 Byparr")
+                            self._list_browser.close()
+                            self._list_browser = None
+                            self._list_renderer = "byparr"
+                    elif self._list_renderer == "browser":
+                        raise SourcePaused("browser_unavailable", "x1080x 列表浏览器运行时未安装")
+                if not self._flaresolverr:
+                    raise SourcePaused("browser_pass_required", "x1080x 列表需要 BrowserPass，请安装浏览器运行时或配置 Byparr")
                 solution = self._flaresolverr.solve(url)
             except SiteRateLimited:
                 self.gate.limit()
@@ -145,6 +199,13 @@ class X1080XHttpClient(SessionHttpClient):
             raise SourcePaused("browser_pass_required", "x1080x 列表浏览器验证未完成，请检查 Byparr")
         body, _, _ = solution
         return body
+
+    def close(self):
+        with self._solve_lock:
+            if self._list_browser is not None:
+                self._list_browser.close()
+                self._list_browser = None
+        super().close()
 
     def _api_fetch(self, method, path, *, data=None, csrf=None):
         url = urljoin(self.base_url + "/", path)
@@ -177,10 +238,12 @@ class X1080XHttpClient(SessionHttpClient):
         except SourcePaused:
             raise
         except Exception as exc:
-            from scrapers.core.cf_challenge import SiteRateLimited
+            from scrapers.core.cf_challenge import SiteBlocked, SiteRateLimited
             if isinstance(exc, SiteRateLimited):
                 self.gate.limit()
                 raise SourcePaused("rate_limited", "x1080x 附件请求命中限流，本轮暂停") from None
+            if isinstance(exc, SiteBlocked):
+                raise SourcePaused("cf_blocked", "x1080x API 请求被 Cloudflare 明确封锁，本轮暂停") from None
             raise SourcePaused("session_unavailable", f"x1080x API 请求未完成（{type(exc).__name__}）") from None
         if result.status_code == 429 or is_rate_limited(result.body):
             raise SourcePaused("rate_limited", "x1080x 附件请求命中限流，本轮暂停")
