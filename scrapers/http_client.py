@@ -44,6 +44,9 @@ class HttpClient(SessionHttpClient):
                         self._merge_cookies([{"name": "_safe", "value": match.group(1)}], url)
                         self._cookie_version += 1
                         self._failed_validation_version = None
+                    if self._browser is not None:
+                        self._browser.set_cookies([{"name": "_safe", "value": match.group(1),
+                                                   "url": self._origin(url)}])
                 # 等待期间其他线程已完成 R18/CF 时，先使用最新状态重试。
                 version = self.validation_version()
                 result = super()._fetch_once(url, "r18_retry")

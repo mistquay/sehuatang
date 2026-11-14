@@ -58,6 +58,11 @@ x1080x:
     password: ""
     headless: true
     timeout: 120
+    # auto：浏览器登录后保持账号 context 执行；http：显式验证 HTTP 接管；browser：账号请求始终在浏览器内。
+    transport: "auto"
+    # 轻量部署可改用 remote_firefox，或使用 docker-compose.browser.yml 的环境变量覆盖。
+    browser:
+      engine: "firefox"
   # Web 配置页可填写完整 Cookie，并同步登录浏览器 User-Agent / 浏览器类型。
   # cookie 模式失效后暂停，等待手动更新；不需要安装无头浏览器。
   cookie: ""
@@ -72,6 +77,17 @@ crawler:
     # 每条失败台账的累计上限，包含首次失败；达到后保留记录并停止重试。
     max_failures: 5
   defaults:
+    # 三个来源共用。默认保留 HTTP；仅对已验证兼容的动态页面设置 mode: browser。
+    browser:
+      mode: "http"
+      engine: "firefox" # firefox（本地）/remote_firefox（外置）/obscura（CDP）
+      timeout: 120
+      wait_selector: "" # 动态页面可指定实际内容就绪的 CSS selector
+      # engine: obscura
+      # endpoint: "ws://obscura:9222"
+      # proxy_url: "" # 必须等于该 Obscura 服务启动时使用的固定代理；空为直连
+      # token 通过 CRAWLER_<SOURCE>_BROWSER_TOKEN 环境变量提供。
+      # 多代理使用 endpoints: {"http://proxy-host:17891": "ws://obscura-1:9222"}
     # 来源逻辑抓取任务总并发上限，不是端口数或每秒请求数。
     concurrency: 4
     # 每个固定代理端口的并发上限；省略时为 1，兼容旧配置。

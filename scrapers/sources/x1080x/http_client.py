@@ -3,12 +3,13 @@ import hashlib
 import json
 import time
 import threading
+from types import SimpleNamespace
 from dataclasses import dataclass, field, replace
 from functools import lru_cache, partial
 from http.cookies import SimpleCookie
 from urllib.parse import urljoin, urlsplit
 
-from scrapers.core.cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited, merge_solution_cookies
+from scrapers.core.cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited, merge_solution_cookies, SiteRateLimited
 from scrapers.core.contracts import SourcePaused
 from scrapers.core.http import CrawlerHttpClient
 from scrapers.core.models import FetchResult
@@ -17,7 +18,8 @@ from scrapers.core.network import proxy_label
 from scrapers.core.session import SessionHttpClient
 from scrapers.core.pool import shared_pool, stop_shared_clients
 from .auth import Authenticator, AuthSettings
-from .list_browser import ListBrowser
+from .list_browser import ListBrowser, ConfiguredListBrowser
+from browser_runtime import BrowserError, create_browser
 from util.log_util import log
 
 
@@ -27,12 +29,16 @@ class SessionResult(FetchResult):
 
 
 class X1080XHttpClient(SessionHttpClient):
+    supports_persistent_browser = True
+
     def __init__(self, settings, *, config=None, base_url="https://1080xin.com", **kwargs):
         super().__init__(settings, **kwargs)
         self.base_url = base_url.rstrip("/")
         self.config = config or {}
         self.authenticator = Authenticator(AuthSettings.from_config(self.config))
         self._auth_lock = threading.Lock()
+        self._account_browser = None
+        self._account_browser_active = self.authenticator.settings.transport == "browser"
         self._list_browser = None
         self._list_renderer = str((self.config.get("challenge") or {}).get("list_renderer", "auto"))
         if self._list_renderer not in {"auto", "browser", "byparr"}:
@@ -56,7 +62,9 @@ class X1080XHttpClient(SessionHttpClient):
 
     def fetch(self, url, stage="detail", **kwargs):
         try:
-            if stage == "list" and self._list_browser is not None:
+            if stage != "list" and self._account_browser_active:
+                result = self._account_render(url)
+            elif stage == "list" and (self._list_browser is not None or self.settings.browser.mode == "browser"):
                 # 已建立的浏览器会话直接翻页，避免 HTTP 先遇 CF 后重复解题。
                 started = time.monotonic()
                 body = self.render_list(url)
@@ -64,7 +72,9 @@ class X1080XHttpClient(SessionHttpClient):
             else:
                 result = super().fetch(url, stage, **kwargs)
         except SourcePaused as exc:
-            result = FetchResult(url, None, None, 0, 0, "session_paused", exc.reason)
+            result = (FetchResult(url, None, 429, 0, 0, "rate_limited", exc.reason)
+                      if exc.reason == "rate_limited" else
+                      FetchResult(url, None, None, 0, 0, "session_paused", exc.reason))
         return SessionResult(**vars(result), client=self)
 
     def browser_cookies(self):
@@ -91,6 +101,54 @@ class X1080XHttpClient(SessionHttpClient):
     def ensure_authenticated(self, resource_id):
         with self._auth_lock:
             self.authenticator.ensure(self, resource_id)
+
+    def _get_account_browser(self):
+        if self._account_browser is None:
+            cfg = self.authenticator.settings
+            proxy_url = self.settings.proxy.url if self.settings.proxy.enabled else ""
+            browser = replace(cfg.browser, endpoint=cfg.browser.endpoint_for(proxy_url),
+                              endpoints=(), timeout=cfg.timeout, headless=cfg.headless)
+            from .auth import browser_proxy
+            self._account_browser = create_browser(browser, self.base_url, proxy=browser_proxy(self.settings),
+                cookies=self.browser_cookies(), purpose="account", stop_event=self.gate.stop_event)
+        return self._account_browser
+
+    def _account_operation(self, operation):
+        started = time.monotonic()
+        with self._solve_lock:
+            try:
+                self.gate.acquire()
+                if self.before_request:
+                    self.before_request()
+                self.gate.check()
+                response = operation(self._get_account_browser())
+            except SiteRateLimited:
+                raise SourcePaused("rate_limited", "x1080x 账号线路正在冷却") from None
+            except BrowserError as exc:
+                if exc.reason == "rate_limited":
+                    self.gate.limit(exc.retry_after)
+                raise SourcePaused(exc.reason, str(exc)) from None
+            # 只镜像同一账号的最新状态；游客浏览器结果永远不调用此路径。
+            self.install_browser_session(response.cookies, response.user_agent)
+        elapsed = int((time.monotonic() - started) * 1000)
+        return response, elapsed
+
+    def login_with_browser(self, settings, resource_id):
+        self._account_operation(lambda browser: browser.login(settings.username, settings.password, resource_id))
+        # auto 在浏览器内持续执行；显式 http 保留原来的接管验收语义。
+        self._account_browser_active = settings.transport != "http"
+        if settings.transport == "http":
+            self._account_browser.close()
+            self._account_browser = None
+
+    def _account_render(self, url):
+        response, elapsed = self._account_operation(lambda browser: browser.render(url))
+        self.network.attempt(url, started=time.monotonic() - elapsed / 1000, elapsed_ms=elapsed,
+                             status=response.status_code, body=response.body)
+        if response.status_code == 200:
+            self.gate.success()
+        return FetchResult(url, response.body, response.status_code, 1, elapsed,
+                           None if response.status_code == 200 and response.body else "http_status")
 
     def is_authenticated(self, resource_id):
         result = self._api_fetch("GET", f"/api/resources/{resource_id}/state")
@@ -170,9 +228,13 @@ class X1080XHttpClient(SessionHttpClient):
                 self.before_request()
             try:
                 if self._list_renderer != "byparr":
-                    if self._list_browser is None and ListBrowser.available():
-                        self._list_browser = ListBrowser(self.settings, self.base_url,
-                                                         self.authenticator.settings.timeout)
+                    if self._list_browser is None:
+                        if self.settings.browser.engine != "firefox":
+                            self._list_browser = ConfiguredListBrowser(self.settings, self.base_url,
+                                self.settings.browser.timeout, self.gate.stop_event)
+                        elif ListBrowser.available():
+                            self._list_browser = ListBrowser(self.settings, self.base_url,
+                                                             self.authenticator.settings.timeout)
                     if self._list_browser is not None:
                         try:
                             return self._list_browser.render(url)
@@ -205,12 +267,17 @@ class X1080XHttpClient(SessionHttpClient):
             if self._list_browser is not None:
                 self._list_browser.close()
                 self._list_browser = None
+            if self._account_browser is not None:
+                self._account_browser.close()
+                self._account_browser = None
         super().close()
 
     def _api_fetch(self, method, path, *, data=None, csrf=None):
         url = urljoin(self.base_url + "/", path)
         if urlsplit(url).netloc != urlsplit(self.base_url).netloc or not url.startswith(self.base_url + "/api/"):
             raise ValueError("x1080x API 请求必须在当前站点内")
+        if self._account_browser_active:
+            return self._browser_api_fetch(method, url, data=data, csrf=csrf)
         headers = {"Referer": self.base_url + "/", "Origin": self.base_url}
         if method == "POST":
             self._prepare_cookies(url)
@@ -248,6 +315,29 @@ class X1080XHttpClient(SessionHttpClient):
         if result.status_code == 429 or is_rate_limited(result.body):
             raise SourcePaused("rate_limited", "x1080x 附件请求命中限流，本轮暂停")
         return result
+
+    def _browser_api_fetch(self, method, url, *, data=None, csrf=None):
+        started = time.monotonic()
+        for attempt in range(1, self.settings.retry.attempts + 1):
+            response, elapsed = self._account_operation(
+                lambda browser: browser.request(method, url, data=data, csrf=csrf))
+            self.network.attempt(url, started=time.monotonic() - elapsed / 1000, elapsed_ms=elapsed,
+                                 status=response.status_code, body=response.body, retry=attempt > 1)
+            if response.status_code == 200:
+                self.gate.success()
+            if response.status_code == 429 or is_rate_limited(response.body):
+                self.gate.limit()
+                raise SourcePaused("rate_limited", "x1080x 浏览器账号请求命中限流")
+            retryable = response.status_code in self.settings.retry.statuses and response.status_code != 429
+            if not retryable or attempt == self.settings.retry.attempts:
+                break
+            # data（包括领取幂等键）在整个循环中保持不变，不生成第二笔操作。
+            retry_after = next((v for k, v in response.headers.items() if k.lower() == "retry-after"), None)
+            delay = CrawlerHttpClient._retry_after(SimpleNamespace(headers={"Retry-After": retry_after}))
+            self._sleep(max(self._transport._retry_delay(attempt), delay))
+        return FetchResult(url, response.body, response.status_code, attempt,
+            int((time.monotonic() - started) * 1000),
+            None if response.status_code == 200 and response.body else "http_status")
 
     def api_json(self, method, path, *, data=None, csrf=None, allow_auth_error=False):
         result = self._api_fetch(method, path, data=data, csrf=csrf)

@@ -3,13 +3,13 @@
 过盾成功后调用方应缓存 solution 里的 Cookie 和 User-Agent，
 后续请求直连复用，仅在 Cookie 失效重新触发挑战时再次过盾。
 """
-import re
 import threading
 from typing import Iterable, Mapping, Optional
 
 from curl_cffi import requests
 
 from util.log_util import log
+from browser_runtime.pages import is_cf_blocked, is_cf_challenge, is_rate_limited, rendered_html_bytes
 
 # 同一个过盾服务实例串行处理，不同端点互不阻塞。
 _SOLVE_LOCKS = {}
@@ -21,21 +21,6 @@ def solver_lock(endpoint):
         return _SOLVE_LOCKS.setdefault(endpoint, threading.Lock())
 
 CF_STATUS = (403, 429, 503)
-_CF_TITLE_KEYWORDS = ("just a moment", "attention required")
-_CF_BODY_MARKERS = (b"cf-challenge", b"__cf_chl", b"challenges.cloudflare.com")
-# 站点自身的限流页（非 CF 挑战）：过盾成功但返回"请求过于频繁"。
-# 简繁两种写法都覆盖，命中后应立即退避，继续请求只会加剧限流。
-_RATE_LIMIT_MARKERS = (
-    "請求過於頻繁",
-    "请求过于频繁",
-    "訪問受限",
-    "访问受限",
-)
-_TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
-_CHARSET_META_RE = re.compile(
-    r'charset=["\']?(gbk|gb2312|big5)["\']?',
-    re.I,
-)
 
 
 class SiteRateLimited(Exception):
@@ -44,34 +29,6 @@ class SiteRateLimited(Exception):
 
 class SiteBlocked(Exception):
     """服务端明确拒绝访问，继续解题或冷却不能视为可恢复挑战。"""
-
-
-def is_cf_blocked(body: Optional[bytes]) -> bool:
-    head = (body or b"")[:16000].lower()
-    return b"cloudflare" in head and any(marker in head for marker in (
-        b"sorry, you have been blocked", b"cf-error-details", b"error code: 1020",
-    ))
-
-
-def is_cf_challenge(body: Optional[bytes], status: Optional[int]) -> bool:
-    if not body or is_cf_blocked(body):
-        return False
-    head = body[:5000]
-    if any(marker in head for marker in _CF_BODY_MARKERS):
-        return True
-    match = _TITLE_RE.search(head)
-    if not match:
-        return False
-    title = match.group(1).decode("utf-8", errors="ignore").strip().lower()
-    return any(keyword in title for keyword in _CF_TITLE_KEYWORDS)
-
-
-def is_rate_limited(body: Optional[bytes]) -> bool:
-    """识别站点限流页（"请求过于频繁"/"访问受限"），与 CF 挑战区分。"""
-    if not body or is_cf_blocked(body):
-        return False
-    text = body[:5000].decode("utf-8", errors="ignore")
-    return any(marker in text for marker in _RATE_LIMIT_MARKERS)
 
 
 class FlareSolverrClient:
@@ -163,8 +120,7 @@ class FlareSolverrClient:
         html = solution.get("response") or ""
         # lxml/bs4 会信任 meta charset；FlareSolverr 返回的已是 unicode 文本，
         # 统一改写为 utf-8 避免二次解码错乱。
-        html = _CHARSET_META_RE.sub('charset="utf-8"', html)
-        body = html.encode("utf-8")
+        body = rendered_html_bytes(html)
         if is_cf_challenge(body, 200):
             self.log.warning(f"FlareSolverr 过盾后仍是挑战页: url={url}")
             return None

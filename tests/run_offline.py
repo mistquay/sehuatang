@@ -33,6 +33,8 @@ def main():
         "tests.sehuatang_run_tests",
         "tests.network_monitor_tests",
         "tests.proxy_failover_tests",
+        "tests.browser_runtime_tests",
+        "tests.multi_proxy_tests", "tests.batch_storage_tests", "tests.x1080x_stream_tests",
     ]
     try:
         suite = unittest.defaultTestLoader.loadTestsFromNames(names)

@@ -1,0 +1,68 @@
+# 与原 compose 叠加使用。先设置 BROWSER_WORKER_TOKEN（至少 32 字节）。
+# docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
+services:
+  sehuatang-crawler:
+    image: ${CRAWLER_LITE_IMAGE:-cxsz16888/sehuatang:v2-lite}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        WITH_X1080X_BROWSER: "false"
+    environment:
+      CRAWLER_X1080X_BROWSER_MODE: browser
+      CRAWLER_X1080X_BROWSER_ENGINE: remote_firefox
+      CRAWLER_X1080X_BROWSER_ENDPOINT: http://firefox:8192
+      CRAWLER_X1080X_BROWSER_TOKEN: ${BROWSER_WORKER_TOKEN:?请设置至少32字节的BROWSER_WORKER_TOKEN}
+      CRAWLER_X1080X_AUTH_TRANSPORT: browser
+      CRAWLER_X1080X_AUTH_BROWSER_ENGINE: remote_firefox
+      CRAWLER_X1080X_AUTH_BROWSER_ENDPOINT: http://firefox:8192
+      CRAWLER_X1080X_AUTH_BROWSER_TOKEN: ${BROWSER_WORKER_TOKEN}
+      CRAWLER_SEHUATANG_BROWSER_TOKEN: ${OBSCURA_CDP_TOKEN:-}
+      CRAWLER_JAVBEE_BROWSER_TOKEN: ${OBSCURA_CDP_TOKEN:-}
+    depends_on:
+      firefox:
+        condition: service_healthy
+
+  byparr:
+    image: ghcr.io/thephaseless/byparr@sha256:c66fa161187b8fa527bfad7eefa2647ea1c553f77df68cbffd6fe83366d1787b
+
+  firefox:
+    image: ${FIREFOX_RUNTIME_IMAGE:-cxsz16888/sehuatang:v2-browser-runtime}
+    build:
+      context: .
+      dockerfile: Dockerfile.browser
+    init: true
+    restart: unless-stopped
+    shm_size: "256mb"
+    stop_grace_period: 30s
+    environment:
+      BROWSER_WORKER_TOKEN: ${BROWSER_WORKER_TOKEN}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    networks:
+      - crawler_network
+    # 不发布宿主机端口。账号与游客使用不同会话；代理由每个会话显式传入。
+
+  obscura:
+    profiles: [obscura]
+    image: ${OBSCURA_IMAGE:-cxsz16888/sehuatang:v2-obscura}
+    build:
+      context: .
+      dockerfile: Dockerfile.obscura
+    init: true
+    restart: unless-stopped
+    environment:
+      OBSCURA_CDP_TOKEN: ${OBSCURA_CDP_TOKEN:-}
+      OBSCURA_NETWORK_BODY_BUFFER_BYTES: "8388608"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    networks:
+      - crawler_network
+    # 按需启用 --profile obscura；使用前设置 OBSCURA_CDP_TOKEN（至少 32 字节）。
+    # 默认直连。需要代理时在 command 显式加 --proxy，并同步对应来源 browser.proxy_url。

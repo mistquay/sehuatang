@@ -189,7 +189,7 @@ class PersistentListBrowserTests(unittest.TestCase):
         renderer = ListBrowser(HttpSettings(), "https://example.test")
         renderer._page = SimpleNamespace(
             goto=AsyncMock(return_value=SimpleNamespace(status=429)), url=URL,
-            content=AsyncMock(side_effect=["<title>Just a moment</title>", listing().decode()]),
+            content=AsyncMock(side_effect=["<title>Just a moment</title>", listing().decode(), listing().decode()]),
             locator=Mock(return_value=SimpleNamespace(count=AsyncMock(side_effect=[0, 1]))))
         with patch("scrapers.sources.x1080x.list_browser._click_verification", new_callable=AsyncMock), \
                 patch("scrapers.sources.x1080x.list_browser.asyncio.sleep", new_callable=AsyncMock):

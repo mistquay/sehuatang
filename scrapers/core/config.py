@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
+from browser_runtime.config import BrowserSettings, load_browser_settings
+
 
 _ALLOWED_PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 
@@ -59,6 +61,7 @@ class HttpSettings:
     solver_url: str = ""
     solver_provider: str = "byparr"
     per_proxy_concurrency: int = 1
+    browser: BrowserSettings = field(default_factory=BrowserSettings)
 
     def validate(self) -> None:
         if not all(math.isfinite(value) for value in (self.timeout, self.min_interval_seconds,
@@ -83,6 +86,10 @@ class HttpSettings:
         if not 0 <= self.retry.jitter <= 1:
             raise ValueError("retry.jitter 必须位于 0 到 1 之间")
         self.proxy.validate()
+        self.browser.validate()
+        if self.browser.engine != "firefox":
+            for proxy_url in self.proxy.addresses:
+                self.browser.endpoint_for(proxy_url)
 
 
 def _merge_dict(base: Mapping[str, Any], override: Mapping[str, Any]) -> Dict[str, Any]:
@@ -235,6 +242,7 @@ def load_source_settings(
         solver_url=str(environ.get(f"{prefix}FLARESOLVERR_URL") or challenge.get("flaresolverr_url")
                        or (config.get("http_client", {}).get("flaresolverr_url") if source == "sehuatang" else "") or ""),
         solver_provider=str(challenge.get("provider", "byparr")),
+        browser=load_browser_settings(raw.get("browser"), environ=environ, prefix=prefix),
         retry=RetrySettings(
             attempts=int(retry.get("attempts", 3)),
             base_delay=float(retry.get("base_delay", 2)),

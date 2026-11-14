@@ -1,0 +1,11 @@
+# 与 Byparr 使用同一个固定运行时基础镜像，复用 Firefox 和系统库镜像层。
+# 此服务提供持久会话；不是将原版 Byparr 的 /v1 当作 Playwright 接口。
+FROM ghcr.io/thephaseless/byparr@sha256:c66fa161187b8fa527bfad7eefa2647ea1c553f77df68cbffd6fe83366d1787b
+
+COPY --chown=1000:1000 browser_runtime /app/browser_runtime
+ENV PYTHONPATH=/app BROWSER_WORKER_HOST=0.0.0.0
+EXPOSE 8192
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:8192/health || exit 1
+ENTRYPOINT ["tini", "-s", "--", "/app/.venv/bin/python"]
+CMD ["-m", "browser_runtime.worker"]

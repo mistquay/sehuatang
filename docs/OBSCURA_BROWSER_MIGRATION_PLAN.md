@@ -159,14 +159,14 @@ Obscura v0.2.7 的 CDP `Target.createBrowserContext` 处理未读取 `proxyServe
 - [x] 查询公开镜像压缩大小，并对应主要构建层。
 - [x] 核对 Obscura 的 CF、代理、持久化和构建特性限制。
 - [ ] 在部署主机只读核对运行中容器 image ID/digest、浏览器版本及实际资源基线。
-- [ ] 使用固定 Obscura 构建完成小范围兼容性原型。
-- [ ] 验证 x1080x 浏览器账号持续执行与 HTTP 接管的差异。
-- [ ] 实现公共执行合同与浏览器会话生命周期，补充隔离、取消、恢复和二进制响应测试。
-- [ ] 确定所有必须使用完整浏览器的流程去向，再构建/测试轻量主镜像。
+- [x] 使用固定 Obscura 构建完成本地模拟站点兼容性原型；真实站点另行验收。
+- [x] 本地验证 x1080x 浏览器账号持续执行及显式 HTTP 接管合同；线上差异待验收。
+- [x] 实现公共执行合同与浏览器会话生命周期，补充隔离、取消、恢复和二进制响应测试。
+- [ ] 完整 Firefox 流程已可外置，轻量主镜像的 Linux 构建/容器验收等待 CI。
 - [ ] 复核 Byparr 权限调整层并评估复用浏览器基础层。
 - [ ] 逐来源、单线路灰度，观察长期会话与实际资源收益。
 
-本次只新增方案文档，不修改构建、业务代码、私有配置或生产部署。当前环境没有 Docker CLI，未声称完成镜像重建或运行内存测量。
+调研初稿只新增方案文档。后续经用户确认开始实施，进度及限制见下方实施记录；当前环境没有 Docker CLI，尚未完成 Linux 镜像重建或生产运行内存测量。
 
 ## 9. 参考来源
 
@@ -187,3 +187,19 @@ Obscura v0.2.7 的 CDP `Target.createBrowserContext` 处理未读取 `proxyServe
 - [爬虫 Docker Hub 标签](https://hub.docker.com/r/cxsz16888/sehuatang/tags?name=v2)
 - [Obscura Docker Hub 标签](https://hub.docker.com/r/h4ckf0r0day/obscura/tags?name=latest)
 - [Byparr GHCR](https://github.com/ThePhaseless/Byparr/pkgs/container/byparr)
+
+## 10. 实施记录（2026-11-14）
+
+- [x] 新增独立 `browser_runtime`，接入 Obscura/CDP、本地 Firefox 与外置持久 Firefox 服务。
+- [x] 三个来源可通过公共配置选择浏览器执行；绑定并验证 Obscura 的代理线路。
+- [x] x1080x 账号登录后默认保持 context，同一浏览器执行详情和 API；保留显式 HTTP 接管及手动 Cookie 语义。
+- [x] 修复内容就绪检查与 HTML 序列化之间的竞态，避免返回旧壳页。
+- [x] 本机真实 Firefox、外置 Firefox 和 Obscura v0.2.7 的模拟站点冒烟通过，包含二进制与身份隔离；Firefox 包含持续登录。
+- [x] 新增轻量构建、固定版 Obscura 构建、共享 Byparr 基础层的 Firefox 构建、Compose 覆盖与先验证再发布的 CI。
+- [x] 完整离线回归 431 项：426 项通过、5 项 MongoDB 集成测试按既有条件跳过；18 个 Python 文件 AST 与 28 个文件 UTF-8 无 BOM 检查通过。
+- [x] Actionlint 检查通过；使用校验过的官方独立 Compose v5.7.1 CLI 验证默认及 Obscura profile 的合并配置，不依赖 Docker daemon。
+- [ ] Linux 镜像实际构建、尺寸测量和容器冒烟：等待有 Docker 的 CI 环境。
+- [ ] 真实站点及线上账号、24 小时续期和逐站灰度：尚未验收。
+- [ ] Byparr 权限层重构：尚未实施。
+
+新增部署说明见 [BROWSER_RUNTIME.md](BROWSER_RUNTIME.md)。实际 GHCR 没有 `v3.1.1` 标签，配套构建和部署固定使用已核实的多架构摘要，而不是不存在的版本标签。

@@ -24,6 +24,8 @@ from scrapers.core.models import FetchResult
 from util.log_util import log
 from .rate_limit import RateLimitSettings, RequestGate, SiteRateLimited
 from .network import NetworkMonitor, PROBE_TIMEOUT, CONTROL_URL, NETWORK_ERRORS, exception_info
+from browser_runtime import BrowserError, create_browser
+from browser_runtime.config import proxy_options
 
 
 class SessionHttpClient:
@@ -56,6 +58,7 @@ class SessionHttpClient:
         self._failed_validation_version = None
         self._local = threading.local()
         self._user_agent = settings.user_agent
+        self._browser = None
         self._flaresolverr = (
             FlareSolverrClient(
                 flaresolverr_url,
@@ -115,6 +118,8 @@ class SessionHttpClient:
 
     def _fetch_once(self, url: str, stage: str) -> FetchResult:
         started = time.monotonic()
+        if self.settings.browser.mode == "browser":
+            return self._fetch_browser(url, stage)
         version = self.validation_version()
         self._local.request_version = None
         result = self._transport.fetch(url, stage)
@@ -193,6 +198,53 @@ class SessionHttpClient:
 
     def _prepare_cookies(self, url):
         """来源插件可在首次请求或检测前应用配置 Cookie。"""
+
+    def _browser_cookies(self, url):
+        self._prepare_cookies(url)
+        with self._cookie_lock:
+            return [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
+                     "secure": c.secure, "httpOnly": c.has_nonstandard_attr("HttpOnly"),
+                     **({"expires": c.expires} if c.expires else {})}
+                    for c in self._jar.jar if not c.is_expired()]
+
+    def _fetch_browser(self, url, stage):
+        started = time.monotonic()
+        try:
+            with self._solve_lock:
+                self.gate.acquire()
+                if self.before_request:
+                    self.before_request()
+                self.gate.check()
+                if self._browser is None:
+                    config = self.settings.browser
+                    proxy_url = self.settings.proxy.url if self.settings.proxy.enabled else ""
+                    if config.engine != "firefox":
+                        config = replace(config, endpoint=config.endpoint_for(proxy_url), endpoints=())
+                    self._browser = create_browser(config, self._origin(url), proxy=proxy_options(proxy_url),
+                        cookies=self._browser_cookies(url), stop_event=self.gate.stop_event)
+                response = self._browser.render(url)
+                with self._cookie_lock:
+                    self._merge_cookies(response.cookies, url)
+                    merge_solution_cookies(self._cookie, response.cookies)
+            elapsed = int((time.monotonic() - started) * 1000)
+            self.network.attempt(url, started=started, elapsed_ms=elapsed, status=response.status_code,
+                                 body=response.body)
+            error = None if response.status_code == 200 and response.body else "http_status"
+            return FetchResult(url, response.body, response.status_code, 1, elapsed, error)
+        except BrowserError as exc:
+            elapsed = int((time.monotonic() - started) * 1000)
+            status = 429 if exc.reason == "rate_limited" else 403 if exc.reason == "cf_blocked" else None
+            self.log.warning(f"浏览器请求未完成: source={self.source} engine={self.settings.browser.engine} "
+                             f"stage={exc.stage} reason={exc.reason} elapsed_ms={elapsed}")
+            if exc.reason == "rate_limited":
+                self.gate.limit(exc.retry_after)
+            # Obscura 不自动继承 Firefox 验证状态，也不将挑战页报为成功。
+            return FetchResult(url, None, status, 1, elapsed, exc.reason, str(exc))
+
+    @staticmethod
+    def _origin(url):
+        parsed = urlsplit(url)
+        return f"{parsed.scheme}://{parsed.netloc}"
 
     def _request_with_cookies(self, url: str, **kwargs):
         method = kwargs.pop("_method", "GET")
@@ -417,6 +469,9 @@ class SessionHttpClient:
 
     def close(self):
         self.gate.stop_event.set()
+        if self._browser is not None:
+            self._browser.close()
+            self._browser = None
         session = getattr(self._local, "session", None)
         if session is not None:
             session.close()

@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 from scrapers.core.cf_challenge import is_cf_blocked, is_cf_challenge, is_rate_limited
 from scrapers.core.contracts import SourcePaused
 from .auth import _click_verification, browser_error_hint, browser_proxy
+from dataclasses import replace
+from browser_runtime import BrowserError, create_browser
 
 
 class ListBrowser:
@@ -41,6 +43,8 @@ class ListBrowser:
             return self._loop.run_until_complete(asyncio.wait_for(self._render(url), self.timeout))
         except Exception as exc:
             stage = self._stage
+            if isinstance(exc, SourcePaused) and exc.reason in {"rate_limited", "cf_blocked"}:
+                raise
             self._loop.run_until_complete(self._reset())
             if isinstance(exc, SourcePaused):
                 raise
@@ -75,7 +79,8 @@ class ListBrowser:
             if urlsplit(page.url).netloc != self.origin:
                 raise SourcePaused("browser_pass_required", "x1080x 列表浏览器跳转到其他站点，本轮暂停")
             if await page.locator(".thread-list").count():
-                return body
+                # selector 检查期间异步列表可能刚插入，重新序列化后再交给解析器。
+                return (await page.content()).encode("utf-8")
             # 初始 BrowserPass 壳页会异步加载列表；普通异常页交回解析器校验。
             if not is_cf_challenge(body, 200) and b'"browserPassRequired"' not in body.replace(b'\\"', b'"'):
                 return body
@@ -104,3 +109,28 @@ class ListBrowser:
             self._executor.submit(self._close).result()
         finally:
             self._executor.shutdown(wait=True)
+
+
+class ConfiguredListBrowser:
+    """Obscura/CDP 或外置 Firefox；游客会话不接收账号 Cookie。"""
+
+    def __init__(self, settings, base_url, timeout=120, stop_event=None):
+        config = settings.browser
+        proxy_url = settings.proxy.url if settings.proxy.enabled else ""
+        config = replace(config, endpoint=config.endpoint_for(proxy_url), endpoints=(), timeout=timeout)
+        self.origin = urlsplit(base_url).netloc
+        self._session = create_browser(config, base_url, proxy=browser_proxy(settings),
+                                       purpose="public", stop_event=stop_event)
+
+    def render(self, url):
+        parsed = urlsplit(url)
+        if parsed.netloc != self.origin or not parsed.path.startswith("/boards/"):
+            raise ValueError("公开列表浏览器只允许当前站点的板块地址")
+        try:
+            return self._session.render(url, ready="x1080x_list").body
+        except BrowserError as exc:
+            reason = "browser_pass_required" if exc.reason in {"browser_timeout", "browser_error"} else exc.reason
+            raise SourcePaused(reason, str(exc)) from None
+
+    def close(self):
+        self._session.close()

@@ -1,0 +1,23 @@
+# 固定带 render+stealth 的官方发行件，并校验 SHA256；不使用未知版本的 latest。
+FROM debian:bookworm-slim AS download
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) archive=obscura-x86_64-linux-stealth.tar.gz; checksum=1d6514beacef9fe75671f4bf7a66d3a7bceef9bde39f8156d1ca4a701eb1e216 ;; \
+      arm64) archive=obscura-aarch64-linux-stealth.tar.gz; checksum=f51167d7ae98be6c6327d3e7e015e74430e190ea6846589e3c131e10641a52b7 ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl --fail --location --retry 3 "https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.7/$archive" -o /tmp/obscura.tar.gz; \
+    echo "$checksum  /tmp/obscura.tar.gz" | sha256sum -c -; \
+    mkdir /out; tar -xzf /tmp/obscura.tar.gz -C /out; \
+    test -x /out/obscura; test -x /out/obscura-worker
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=download /out/obscura /obscura
+COPY --from=download /out/obscura-worker /obscura-worker
+ENV OBSCURA_NETWORK_BODY_BUFFER_BYTES=8388608
+EXPOSE 9222
+ENTRYPOINT ["/obscura"]
+CMD ["serve", "--host", "0.0.0.0", "--port", "9222", "--stealth"]

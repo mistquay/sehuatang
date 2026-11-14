@@ -1,0 +1,152 @@
+name: 浏览器外置与轻量镜像
+
+on:
+  push:
+    branches: [main, master, v2]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master, v2]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: cxsz16888/sehuatang
+
+jobs:
+  build-verify-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 轻量镜像标签
+        id: lite
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: suffix=-lite
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Firefox 运行时标签
+        id: firefox
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: suffix=-browser-runtime
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Obscura 标签
+        id: obscura
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: suffix=-obscura
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 构建轻量爬虫
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: crawler-lite:ci
+          build-args: WITH_X1080X_BROWSER=false
+          cache-from: type=gha,scope=browser-lite
+          cache-to: type=gha,mode=max,scope=browser-lite
+
+      - name: 构建 Firefox 服务
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.browser
+          platforms: linux/amd64
+          load: true
+          tags: crawler-firefox:ci
+          cache-from: type=gha,scope=browser-firefox
+          cache-to: type=gha,mode=max,scope=browser-firefox
+
+      - name: 构建固定版 Obscura
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.obscura
+          platforms: linux/amd64
+          load: true
+          tags: crawler-obscura:ci
+          cache-from: type=gha,scope=browser-obscura
+          cache-to: type=gha,mode=max,scope=browser-obscura
+
+      - name: 验证三个镜像的真实执行链路
+        env:
+          BROWSER_WORKER_TOKEN: ci-fixture-browser-token-at-least-32-bytes
+          OBSCURA_CDP_TOKEN: ci-fixture-obscura-token-at-least-32-bytes
+        run: |
+          set -eu
+          docker network create --internal browser-ci
+          trap 'docker logs ci-firefox; docker logs ci-obscura; docker rm -f ci-firefox ci-obscura >/dev/null 2>&1 || true; docker network rm browser-ci >/dev/null 2>&1 || true' EXIT
+          docker run --rm crawler-lite:ci python -c 'import importlib.util; assert importlib.util.find_spec("invisible_playwright") is None'
+          docker run -d --name ci-firefox --network browser-ci --shm-size 256m --memory 2g \
+            -e BROWSER_WORKER_TOKEN crawler-firefox:ci
+          docker run -d --name ci-obscura --network browser-ci --memory 1g \
+            -e OBSCURA_CDP_TOKEN crawler-obscura:ci \
+            serve --host 0.0.0.0 --port 9222 --stealth --allow-private-network
+          for attempt in $(seq 1 20); do
+            if docker exec ci-firefox /app/.venv/bin/python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8192/health", timeout=2)' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker run --rm --name ci-fixture --network browser-ci -e BROWSER_WORKER_TOKEN crawler-lite:ci \
+            python scripts/browser_smoke.py --engine remote_firefox --endpoint http://ci-firefox:8192 \
+            --fixture-port 8765 --fixture-origin http://ci-fixture:8765
+          docker run --rm --name ci-fixture --network browser-ci -e OBSCURA_CDP_TOKEN crawler-lite:ci \
+            python scripts/browser_smoke.py --engine obscura --endpoint ws://ci-obscura:9222 \
+            --fixture-port 8765 --fixture-origin http://ci-fixture:8765
+          {
+            echo '### 本次镜像解压后的逻辑大小（不等于压缩拉取量或共享层后占用）'
+            docker image inspect crawler-lite:ci crawler-firefox:ci crawler-obscura:ci \
+              --format '{{join .RepoTags ", "}}: {{.Size}} bytes'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 登录 Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 发布已验证的镜像
+        if: github.event_name != 'pull_request'
+        env:
+          LITE_TAGS: ${{ steps.lite.outputs.tags }}
+          FIREFOX_TAGS: ${{ steps.firefox.outputs.tags }}
+          OBSCURA_TAGS: ${{ steps.obscura.outputs.tags }}
+        run: |
+          set -eu
+          publish() {
+            local source="$1"
+            local tags="$2"
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              docker tag "$source" "$tag"
+              docker push "$tag"
+            done <<< "$tags"
+          }
+          publish crawler-lite:ci "$LITE_TAGS"
+          publish crawler-firefox:ci "$FIREFOX_TAGS"
+          publish crawler-obscura:ci "$OBSCURA_TAGS"

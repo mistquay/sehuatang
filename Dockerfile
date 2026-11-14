@@ -14,10 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-auth.txt ./
+COPY requirements.txt requirements-browser.txt requirements-auth.txt ./
 RUN if [ "$WITH_X1080X_BROWSER" = "true" ]; then \
       pip install --no-cache-dir -r requirements-auth.txt; \
-    else pip install --no-cache-dir -r requirements.txt; fi
+    else pip install --no-cache-dir -r requirements-browser.txt; fi
 
 # 运行阶段
 FROM python:3.11-slim-trixie
